@@ -8,7 +8,6 @@ Two front ends, one core:
 Per-message channels:
   <prompt>               -> Claude API loop (MODEL): run_shell / add_note / list_notes
   iris <prompt> / ask iris   -> hand the whole job to Claude Code (full autonomy)
-  blog <topic>           -> CC writes + publishes a blog post to mrgreen.blog
   usage / tokens / cost  -> report API token spend (router loop only; cc bills separately)
 
 LAN / sole-user box. Secrets in .env (ANTHROPIC_API_KEY, TELEGRAM_*).
@@ -39,7 +38,6 @@ NOTES_FILE = os.path.expanduser("~/notes.md")
 USAGE_FILE = os.path.expanduser("~/iris/usage.jsonl")
 CC_LOG_FILE = os.path.expanduser("~/iris/cc_calls.jsonl")
 ALERT_FLAG_FILE = os.path.expanduser("~/iris/alerted.txt")
-BLOG_DIR = os.path.expanduser("~/blog")
 
 # Spend guards (Haiku API spend tracked in usage.jsonl; CC billed separately via CC_DAILY_LIMIT)
 SPEND_ALERT = 0.50   # warn when daily Haiku spend crosses this
@@ -349,17 +347,6 @@ def converse(client, messages, text):
         return ask_cc(text[9:].strip())
     elif text.startswith("iris "):
         return ask_cc(text[5:].strip())
-    elif text.lower().startswith("blog "):
-        topic = text[5:].strip()
-        return ask_cc(
-            f"Write and publish a blog post to ~/blog about: {topic}. "
-            "Rules: content dir is ~/blog/content/, frontmatter is TOML (+++...+++ delimiters) with "
-            "title, date (YYYY-MM-DD today), path (slug), and [taxonomies] tags array. "
-            "Filename = slug + .md, no date prefix. Write substantive prose, no bullet-point filler. "
-            "After writing: git -C ~/blog add content/<filename>, git -C ~/blog commit -m 'add: <slug>', "
-            "git -C ~/blog push. GitHub Actions auto-deploys. Report the post title and URL slug when done."
-        )
-
     else:
         return converse_local(text.strip())  # default: free local Ollama
     # Haiku spend guard
