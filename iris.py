@@ -343,13 +343,13 @@ def converse(client, messages, text):
     # router-level commands (no model call)
     if text in ("usage", "tokens", "cost"):
         return report_usage()
-    if text.startswith("g "):
-        return converse_local(text[2:].strip())
-    if text.startswith("ask iris "):
-        return ask_cc(text[7:].strip())
-    if text.startswith("iris "):
-        return ask_cc(text[3:].strip())
-    if text.lower().startswith("blog "):
+    if text.startswith("h "):
+        pass  # fall through to Haiku below
+    elif text.startswith("ask iris "):
+        return ask_cc(text[9:].strip())
+    elif text.startswith("iris "):
+        return ask_cc(text[5:].strip())
+    elif text.lower().startswith("blog "):
         topic = text[5:].strip()
         return ask_cc(
             f"Write and publish a blog post to ~/blog about: {topic}. "
@@ -360,6 +360,8 @@ def converse(client, messages, text):
             "git -C ~/blog push. GitHub Actions auto-deploys. Report the post title and URL slug when done."
         )
 
+    else:
+        return converse_local(text.strip())  # default: free local Ollama
     # Haiku spend guard
     daily = get_daily_spend()
     if daily >= SPEND_CAP:
