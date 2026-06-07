@@ -2,12 +2,12 @@
 """Minimal Claude router.
 
 Two front ends, one core:
-  python router.py              terminal stdin loop
-  python router.py --telegram   Telegram bot (long-poll)
+  python iris.py              terminal stdin loop
+  python iris.py --telegram   Telegram bot (long-poll)
 
 Per-message channels:
   <prompt>               -> Claude API loop (MODEL): run_shell / add_note / list_notes
-  cc <prompt> / ask cc   -> hand the whole job to Claude Code (full autonomy)
+  iris <prompt> / ask iris   -> hand the whole job to Claude Code (full autonomy)
   blog <topic>           -> CC writes + publishes a blog post to mrgreen.blog
   usage / tokens / cost  -> report API token spend (router loop only; cc bills separately)
 
@@ -36,9 +36,9 @@ LOCAL_NUM_CTX = 8192   # routing needs little; no 64k, no KV-quant
 LOCAL_MAX_STEPS = 8    # tool-loop cap
 
 NOTES_FILE = os.path.expanduser("~/notes.md")
-USAGE_FILE = os.path.expanduser("~/router/usage.jsonl")
-CC_LOG_FILE = os.path.expanduser("~/router/cc_calls.jsonl")
-ALERT_FLAG_FILE = os.path.expanduser("~/router/alerted.txt")
+USAGE_FILE = os.path.expanduser("~/iris/usage.jsonl")
+CC_LOG_FILE = os.path.expanduser("~/iris/cc_calls.jsonl")
+ALERT_FLAG_FILE = os.path.expanduser("~/iris/alerted.txt")
 BLOG_DIR = os.path.expanduser("~/blog")
 
 # Spend guards (Haiku API spend tracked in usage.jsonl; CC billed separately via CC_DAILY_LIMIT)
@@ -345,9 +345,9 @@ def converse(client, messages, text):
         return report_usage()
     if text.startswith("g "):
         return converse_local(text[2:].strip())
-    if text.startswith("ask cc "):
+    if text.startswith("ask iris "):
         return ask_cc(text[7:].strip())
-    if text.startswith("cc "):
+    if text.startswith("iris "):
         return ask_cc(text[3:].strip())
     if text.lower().startswith("blog "):
         topic = text[5:].strip()
