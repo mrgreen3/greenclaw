@@ -8,6 +8,7 @@ Two front ends, one core:
 Per-message channels:
   <prompt>               -> Claude API loop (MODEL): run_shell / add_note / list_notes
   cc <prompt> / ask cc   -> hand the whole job to Claude Code (full autonomy)
+  blog <topic>           -> CC writes + publishes a blog post to mrgreen.blog
   usage / tokens / cost  -> report API token spend (router loop only; cc bills separately)
 
 LAN / sole-user box. Secrets in .env (ANTHROPIC_API_KEY, TELEGRAM_*).
@@ -28,8 +29,22 @@ import httpx
 MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 8192  # terse router replies; raise if shell output gets truncated
 
+# Local model channel (`g <prompt>`): Ollama on the box — free, for the routine run_shell/notes loop.
+LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "qwen2.5:3b-instruct")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+LOCAL_NUM_CTX = 8192   # routing needs little; no 64k, no KV-quant
+LOCAL_MAX_STEPS = 8    # tool-loop cap
+
 NOTES_FILE = os.path.expanduser("~/notes.md")
 USAGE_FILE = os.path.expanduser("~/router/usage.jsonl")
+CC_LOG_FILE = os.path.expanduser("~/router/cc_calls.jsonl")
+ALERT_FLAG_FILE = os.path.expanduser("~/router/alerted.txt")
+BLOG_DIR = os.path.expanduser("~/blog")
+
+# Spend guards (Haiku API spend tracked in usage.jsonl; CC billed separately via CC_DAILY_LIMIT)
+SPEND_ALERT = 0.50   # warn when daily Haiku spend crosses this
+SPEND_CAP   = 2.00   # hard-stop Haiku calls above this
+CC_DAILY_LIMIT = 20  # max CC invocations per day
 
 # (input, output) USD per 1M tokens.
 RATES = {
@@ -128,6 +143,63 @@ def list_notes():
     return head + "\n".join(tail)
 
 
+def get_daily_spend():
+    """Sum today's Haiku API spend from usage.jsonl."""
+    if not os.path.exists(USAGE_FILE):
+        return 0.0
+    today = datetime.now().strftime("%Y-%m-%d")
+    total = 0.0
+    for line in open(USAGE_FILE):
+        try:
+            r = json.loads(line)
+            if r.get("ts", "").startswith(today):
+                total += r.get("cost", 0.0)
+        except Exception:  # noqa: BLE001
+            continue
+    return total
+
+
+def get_daily_cc_calls():
+    """Count today's CC invocations from cc_calls.jsonl."""
+    if not os.path.exists(CC_LOG_FILE):
+        return 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    count = 0
+    for line in open(CC_LOG_FILE):
+        try:
+            r = json.loads(line)
+            if r.get("ts", "").startswith(today):
+                count += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return count
+
+
+def log_cc_call(prompt_preview):
+    try:
+        rec = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "prompt": prompt_preview[:120],
+        }
+        with open(CC_LOG_FILE, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception as e:  # noqa: BLE001
+        print(f"[cc log error] {e}")
+
+
+def should_alert():
+    """True if alert threshold crossed and not yet alerted today."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    if os.path.exists(ALERT_FLAG_FILE):
+        if open(ALERT_FLAG_FILE).read().strip() == today:
+            return False
+    if get_daily_spend() >= SPEND_ALERT:
+        with open(ALERT_FLAG_FILE, "w") as f:
+            f.write(today)
+        return True
+    return False
+
+
 CC_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 
 
@@ -135,7 +207,13 @@ def ask_cc(prompt):
     """Hand the whole job to Claude Code headless, full autonomy. Bypasses the API loop."""
     if not (shutil.which("claude") or os.path.exists(CC_BIN)):
         return "[error] claude CLI not found"
-    print("  [-> Claude Code, full autonomy — may take a while]")
+
+    cc_today = get_daily_cc_calls()
+    if cc_today >= CC_DAILY_LIMIT:
+        return f"[blocked] CC daily limit reached ({CC_DAILY_LIMIT} calls). Reset tomorrow."
+
+    log_cc_call(prompt)
+    print(f"  [-> Claude Code, full autonomy — may take a while] (CC call {cc_today + 1}/{CC_DAILY_LIMIT} today)")
     try:
         p = subprocess.run(
             [CC_BIN, "-p", prompt, "--dangerously-skip-permissions"],
@@ -191,9 +269,11 @@ def report_usage():
         a_in += r.get("in", 0); a_out += r.get("out", 0)
         if r.get("ts", "").startswith(today):
             t_cost += r.get("cost", 0); t_n += 1
+    cc_today = get_daily_cc_calls()
     return (
-        f"API token spend (router loop only — `cc` jobs bill via Claude Code separately):\n"
-        f"  today: ${t_cost:.4f} over {t_n} calls\n"
+        f"API token spend (Haiku loop only — CC jobs bill via Claude Code separately):\n"
+        f"  today: ${t_cost:.4f} over {t_n} calls | alert at ${SPEND_ALERT:.2f} | cap at ${SPEND_CAP:.2f}\n"
+        f"  CC invocations today: {cc_today}/{CC_DAILY_LIMIT}\n"
         f"  total: ${a_cost:.4f} over {a_n} calls ({a_in:,} in / {a_out:,} out tokens)"
     )
 
@@ -208,15 +288,82 @@ def dispatch_tool(name, inp):
     return f"[error] unknown tool {name}"
 
 
+def _ollama_tools():
+    """Convert the Anthropic-style TOOLS list to Ollama's function-tool format."""
+    return [
+        {"type": "function", "function": {
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["input_schema"],
+        }}
+        for t in TOOLS
+    ]
+
+
+def converse_local(text):
+    """`g <prompt>`: the run_shell/notes tool loop against local Ollama (granite). Stateless per call, free, no API spend."""
+    msgs = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": text},
+    ]
+    parts = []
+    for _ in range(LOCAL_MAX_STEPS):
+        try:
+            r = httpx.post(OLLAMA_URL, json={
+                "model": LOCAL_MODEL,
+                "messages": msgs,
+                "tools": _ollama_tools(),
+                "stream": False,
+                "options": {"num_ctx": LOCAL_NUM_CTX, "temperature": 0},
+            }, timeout=300)
+            m = r.json().get("message", {})
+        except Exception as e:  # noqa: BLE001
+            return f"[local error] {e}"
+        msgs.append(m)
+        if (m.get("content") or "").strip():
+            parts.append(m["content"])
+        calls = m.get("tool_calls")
+        if not calls:
+            break
+        for tc in calls:
+            fn = tc.get("function", {}).get("name", "")
+            args = tc.get("function", {}).get("arguments") or {}
+            print(f"  [g:{fn}] {args.get('command') or args.get('text') or fn}")
+            msgs.append({"role": "tool", "content": dispatch_tool(fn, args)})
+    return "\n".join(parts).strip() or "(no reply)"
+
+
 def converse(client, messages, text):
     """Handle one user message. Returns reply text; mutates `messages`."""
+    # sleep window: silent drop 22:00-05:00
+    hour = datetime.now().hour
+    if hour >= 22 or hour < 5:
+        return None
+
     # router-level commands (no model call)
     if text in ("usage", "tokens", "cost"):
         return report_usage()
+    if text.startswith("g "):
+        return converse_local(text[2:].strip())
     if text.startswith("ask cc "):
         return ask_cc(text[7:].strip())
     if text.startswith("cc "):
         return ask_cc(text[3:].strip())
+    if text.lower().startswith("blog "):
+        topic = text[5:].strip()
+        return ask_cc(
+            f"Write and publish a blog post to ~/blog about: {topic}. "
+            "Rules: content dir is ~/blog/content/, frontmatter is TOML (+++...+++ delimiters) with "
+            "title, date (YYYY-MM-DD today), path (slug), and [taxonomies] tags array. "
+            "Filename = slug + .md, no date prefix. Write substantive prose, no bullet-point filler. "
+            "After writing: git -C ~/blog add content/<filename>, git -C ~/blog commit -m 'add: <slug>', "
+            "git -C ~/blog push. GitHub Actions auto-deploys. Report the post title and URL slug when done."
+        )
+
+    # Haiku spend guard
+    daily = get_daily_spend()
+    if daily >= SPEND_CAP:
+        return f"[blocked] daily Haiku spend cap ${SPEND_CAP:.2f} reached (${daily:.4f} spent). Reset tomorrow."
 
     messages.append({"role": "user", "content": text})
     parts = []
@@ -246,7 +393,10 @@ def converse(client, messages, text):
                 })
         messages.append({"role": "user", "content": results})
 
-    return "\n".join(parts).strip() or "(no reply)"
+    reply = "\n".join(parts).strip() or "(no reply)"
+    if should_alert():
+        reply += f"\n\n⚠️ spend alert: Haiku daily spend crossed ${SPEND_ALERT:.2f} (${get_daily_spend():.4f} so far). Cap at ${SPEND_CAP:.2f}."
+    return reply
 
 
 def run_terminal(client):
@@ -262,7 +412,9 @@ def run_terminal(client):
             continue
         if user in ("exit", "quit"):
             break
-        print(converse(client, messages, user))
+        reply = converse(client, messages, user)
+        if reply is not None:
+            print(reply)
         print()
 
 
@@ -315,7 +467,9 @@ def run_telegram(client):
                 print(f"[blocked] chat {chat}: {text!r}")
                 continue
             print(f"[tg {chat}] {text}")
-            send(chat, converse(client, messages, text))
+            reply = converse(client, messages, text)
+            if reply is not None:
+                send(chat, reply)
 
 
 def main():
