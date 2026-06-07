@@ -214,7 +214,7 @@ def ask_cc(prompt):
     print(f"  [-> Claude Code, full autonomy — may take a while] (CC call {cc_today + 1}/{CC_DAILY_LIMIT} today)")
     try:
         p = subprocess.run(
-            [CC_BIN, "-p", prompt, "--dangerously-skip-permissions"],
+            [CC_BIN, "-p", prompt, "--model", "claude-sonnet-4-6", "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=900,
         )
         out = (p.stdout or "").strip()
