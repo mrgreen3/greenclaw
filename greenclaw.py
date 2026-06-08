@@ -2,12 +2,12 @@
 """Minimal Claude router.
 
 Two front ends, one core:
-  python iris.py              terminal stdin loop
-  python iris.py --telegram   Telegram bot (long-poll)
+  python greenclaw.py              terminal stdin loop
+  python greenclaw.py --telegram   Telegram bot (long-poll)
 
 Per-message channels:
   <prompt>               -> Claude API loop (MODEL): run_shell / add_note / list_notes
-  iris <prompt> / ask iris   -> hand the whole job to Claude Code (full autonomy)
+  gc <prompt> / ask gc   -> hand the whole job to Claude Code (full autonomy)
   usage / tokens / cost  -> report API token spend (router loop only; cc bills separately)
 
 LAN / sole-user box. Secrets in .env (ANTHROPIC_API_KEY, TELEGRAM_*).
@@ -37,9 +37,9 @@ LOCAL_NUM_CTX = 8192   # routing needs little; no 64k, no KV-quant
 LOCAL_MAX_STEPS = 8    # tool-loop cap
 
 NOTES_FILE = os.path.expanduser("~/notes.md")
-USAGE_FILE = os.path.expanduser("~/iris/usage.jsonl")
-CC_LOG_FILE = os.path.expanduser("~/iris/cc_calls.jsonl")
-ALERT_FLAG_FILE = os.path.expanduser("~/iris/alerted.txt")
+USAGE_FILE = os.path.expanduser("~/greenclaw/usage.jsonl")
+CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
+ALERT_FLAG_FILE = os.path.expanduser("~/greenclaw/alerted.txt")
 
 # Spend guards (Haiku API spend tracked in usage.jsonl; CC billed separately via CC_DAILY_LIMIT)
 SPEND_ALERT = 0.50   # warn when daily Haiku spend crosses this
@@ -57,7 +57,9 @@ SYSTEM = (
     "You are a terse router agent on Kev's home server (Lenovo M710q, Linux). "
     "Use run_shell to inspect the box and carry out tasks. Use add_note to jot "
     "something down when Kev says remember/note/jot, and list_notes to read them "
-    "back. Be concise — lead with the answer. Confirm before anything destructive."
+    "back. Use delegate_to_cc for anything requiring external access you lack — "
+    "Gmail, web search, calendar, APIs — never say you can't do it, just delegate. "
+    "Be concise — lead with the answer. Confirm before anything destructive."
 )
 
 TOOLS = [
@@ -281,12 +283,14 @@ def dispatch_tool(name, inp):
         return add_note(inp.get("text", ""))
     if name == "list_notes":
         return list_notes()
+    if name == "delegate_to_cc":
+        return ask_cc(inp.get("query", ""))
     return f"[error] unknown tool {name}"
 
 
 def _ollama_tools():
-    """Convert the Anthropic-style TOOLS list to Ollama's function-tool format."""
-    return [
+    """Convert the Anthropic-style TOOLS list to Ollama's function-tool format, plus CC delegation."""
+    tools = [
         {"type": "function", "function": {
             "name": t["name"],
             "description": t["description"],
@@ -294,6 +298,20 @@ def _ollama_tools():
         }}
         for t in TOOLS
     ]
+    tools.append({"type": "function", "function": {
+        "name": "delegate_to_cc",
+        "description": (
+            "Delegate to Claude Code when you cannot handle a task yourself — "
+            "e.g. checking email/Gmail, searching the web, or anything requiring "
+            "external access you don't have. Returns Claude Code's reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
+            "required": ["query"],
+        },
+    }})
+    return tools
 
 
 def converse_local(text):
@@ -324,7 +342,7 @@ def converse_local(text):
         for tc in calls:
             fn = tc.get("function", {}).get("name", "")
             args = tc.get("function", {}).get("arguments") or {}
-            print(f"  [g:{fn}] {args.get('command') or args.get('text') or fn}")
+            print(f"  [g:{fn}] {args.get('command') or args.get('text') or args.get('query') or fn}")
             msgs.append({"role": "tool", "content": dispatch_tool(fn, args)})
     return "\n".join(parts).strip() or "(no reply)"
 
@@ -336,9 +354,9 @@ def converse(client, messages, text):
         return report_usage()
     if text.startswith("h "):
         pass  # fall through to Haiku below
-    elif text.startswith("ask iris "):
-        return ask_cc(text[9:].strip())
-    elif text.startswith("iris "):
+    elif text.startswith("ask gc "):
+        return ask_cc(text[7:].strip())
+    elif text.startswith("gc "):
         return ask_cc(text[5:].strip())
     else:
         return converse_local(text.strip())  # default: free local Ollama
@@ -466,8 +484,8 @@ def run_telegram(client):
             print(f"[tg {chat}] {text}")
             if text in ("usage", "tokens", "cost"):
                 reply = report_usage()
-            elif text.startswith("iris "):
-                reply = converse_local(text[5:].strip())
+            elif text.startswith("gc "):
+                reply = converse_local(text[3:].strip())
             elif text.startswith("h "):
                 reply = converse(client, messages, text)
             else:
