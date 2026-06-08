@@ -1,27 +1,153 @@
-# GreenWire
+# GreenClaw
 
-Thin Claude router — a lean relay, not a brain. Takes prompts (terminal or
-Telegram), hands the thinking to the Claude API, runs tools locally, returns the
-answer. Runs on a low-power always-on box (Lenovo M710q). **No local model.**
+A personal Telegram→AI bridge running on a low-power home server. Send a message, get a capable AI response — no GPU, no cloud subscription beyond what you already have, no waste.
 
-## Why
-Agentic AI without buying a GPU: rent intelligence per-call from the API, keep a
-tiny auditable harness on hardware you already own.
+Single Python file. Lean, auditable, yours.
 
-## Channels
-- `<prompt>`        cheap routine loop (Haiku) with shell + notes tools
-- `cc <prompt>`     hand the whole job to Claude Code (full autonomy)
-- `usage`           API token spend so far (router loop; cc bills separately)
+---
 
-## Run
-    python -m venv .venv && . .venv/bin/activate
-    pip install anthropic            # httpx ships with it
-    cp .env.example .env             # add ANTHROPIC_API_KEY (+ TELEGRAM_* for bot)
-    python router.py                 # terminal
-    python router.py --telegram      # Telegram bot
+## What it does
 
-Boot: systemd user service + `loginctl enable-linger`.
+GreenClaw sits on a headless Lenovo M710q (Arch Linux, ~10W idle) and listens for Telegram messages via long-poll. Each message is routed to the right AI backend depending on what you need. Results come back to Telegram.
 
-## Layout
-- `router.py`      the whole thing
-- `.env.example`   config template (never commit `.env`)
+It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone.
+
+---
+
+## How it works
+
+### Message routing
+
+| Prefix | Goes to | Cost |
+|--------|---------|------|
+| _(anything)_ | Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
+| `gc <prompt>` | Local Ollama (Qwen2.5:3b) | Free — runs on the box |
+| `h <prompt>` | Claude Haiku via Anthropic API | Paid, spend-capped |
+| `usage` / `tokens` / `cost` | Spend report | — |
+
+**Default path** (no prefix) delegates to Claude Code running headlessly on the server. Claude Code uses your claude.ai Pro OAuth session — no API credits consumed.
+
+**`gc` path** runs Qwen2.5:3b-instruct locally via Ollama. Zero cloud, zero cost, instant for routine tasks like checking system state or running commands.
+
+**`h` path** hits the Anthropic API directly with Claude Haiku. Fast and cheap but metered — guarded by daily spend alerts and a hard cap.
+
+### Tools available to the AI
+
+- `run_shell` — execute any command on the server and return output
+- `add_note` — append a timestamped note to `~/notes.md`
+- `list_notes` — read notes back
+
+Claude Code (default path) has full autonomy: web search, file access, GitHub, email, anything Claude Code can do.
+
+### Architecture
+
+```
+Telegram message
+    │
+    ├── gc <prompt>     →  Ollama (local, Qwen2.5:3b)  →  free
+    ├── h <prompt>      →  Anthropic API (Haiku)        →  metered, capped
+    ├── usage           →  spend report
+    │
+    └── anything else   →  Claude Code CLI (OAuth/Pro)  →  subscription
+```
+
+Runs as a systemd user service. Survives reboots and SSH disconnects.
+
+---
+
+## The green angle
+
+GreenClaw was designed around a simple principle: **don't burn resources you don't need to**.
+
+**Hardware**: The Lenovo M710q is a mini PC that draws around 10W at idle, 35W under load. It was already running 24/7. GreenClaw adds negligible overhead to a box that would be on anyway.
+
+**No GPU**: Most personal AI setups assume you need a GPU. GreenClaw doesn't — it routes to the right tool for the job rather than running a large local model constantly.
+
+**Local first where it fits**: The `gc` path runs Qwen2.5:3b on-device via Ollama. For simple tasks — check a log, run a command, look something up — it never leaves the house. No API call, no cloud inference, no energy spent in a data centre.
+
+**Subscription over metered for heavy work**: For tasks that need a capable model, GreenClaw delegates to Claude Code using an OAuth session tied to a flat-rate Pro subscription. The cost is fixed regardless of usage — no incentive to minimise tokens at the expense of quality, and no surprise bills from heavy use.
+
+**Spend guards on the metered path**: The Haiku API path (the one with per-token billing) has a daily alert threshold and a hard cap. If something goes wrong or usage spikes, it stops rather than runs up a bill.
+
+**The fix that started it**: An early version of GreenClaw passed the Anthropic API key to Claude Code subprocesses, causing OAuth-authed Claude Code to fall back to billing API credits. That was caught and fixed — Claude Code now runs in a clean environment without the API key, ensuring it always uses the OAuth session.
+
+---
+
+## Setup
+
+### Requirements
+
+- Python 3.11+
+- [Ollama](https://ollama.com) with `qwen2.5:3b-instruct` pulled
+- Claude Code CLI installed and logged in (`claude login`)
+- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
+
+### Install
+
+```bash
+git clone git@github.com:mrgreen3/greenclaw.git
+cd greenclaw
+python -m venv .venv && source .venv/bin/activate
+pip install anthropic httpx
+cp .env.example .env   # fill in your keys
+```
+
+### `.env`
+
+```
+ANTHROPIC_API_KEY=sk-ant-...   # only needed for the h (Haiku) path
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...           # your Telegram user ID — locks the bot to you only
+```
+
+To find your chat ID: leave `TELEGRAM_CHAT_ID` blank, start the bot, message it — it will report your ID. Set it and restart.
+
+### Run
+
+```bash
+# Terminal (interactive)
+python greenclaw.py
+
+# Telegram bot
+python greenclaw.py --telegram
+```
+
+### Systemd service
+
+```bash
+# Install and enable
+systemctl --user enable --now greenclaw-bot.service
+
+# Survive logout
+loginctl enable-linger $USER
+
+# Logs
+journalctl --user -u greenclaw-bot.service -f
+
+# Restart after changes
+systemctl --user restart greenclaw-bot.service
+```
+
+---
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `greenclaw.py` | Everything — single file, intentional |
+| `.env` | Secrets — never commit this |
+| `usage.jsonl` | Anthropic API token spend log |
+| `cc_calls.jsonl` | Claude Code invocation log |
+| `~/notes.md` | Notes written via `add_note` tool |
+
+---
+
+## Hardware
+
+Lenovo M710q Tiny — Intel Core i5, 16GB RAM, 234GB NVMe, running SwayBang Linux (Arch-based). Headless, boots to TTY. Accessible via Tailscale and SSH.
+
+---
+
+## Name
+
+GreenClaw: low footprint, runs quiet, shows up when needed. The green is in the approach — not a badge, just a design constraint.
