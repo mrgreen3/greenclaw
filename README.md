@@ -1,6 +1,6 @@
 # GreenClaw
 
-![GreenClaw](mrclaw-green.svg)
+<img src="mrclaw-green.svg" width="60"/>
 
 A personal Telegram→AI bridge running on a low-power home server. Send a message, get a capable AI response — no GPU, no cloud subscription beyond what you already have, no waste.
 
