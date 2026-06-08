@@ -22,14 +22,11 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 |--------|---------|------|
 | _(anything)_ | Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
 | `gc <prompt>` | Local Ollama (Qwen2.5:3b) | Free — runs on the box |
-| `h <prompt>` | Claude Haiku via Anthropic API | Paid, spend-capped |
-| `usage` / `tokens` / `cost` | Spend report | — |
+| `usage` / `tokens` / `cost` | CC invocation count | — |
 
 **Default path** (no prefix) delegates to Claude Code running headlessly on the server. Claude Code uses your claude.ai Pro OAuth session — no API credits consumed.
 
 **`gc` path** runs Qwen2.5:3b-instruct locally via Ollama. Zero cloud, zero cost, instant for routine tasks like checking system state or running commands.
-
-**`h` path** hits the Anthropic API directly with Claude Haiku. Fast and cheap but metered — guarded by daily spend alerts and a hard cap.
 
 ### Tools available to the AI
 
@@ -45,8 +42,7 @@ Claude Code (default path) has full autonomy: web search, file access, GitHub, e
 Telegram message
     │
     ├── gc <prompt>     →  Ollama (local, Qwen2.5:3b)  →  free
-    ├── h <prompt>      →  Anthropic API (Haiku)        →  metered, capped
-    ├── usage           →  spend report
+    ├── usage           →  CC invocation count
     │
     └── anything else   →  Claude Code CLI (OAuth/Pro)  →  subscription
 ```
@@ -67,9 +63,9 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 
 **Subscription over metered for heavy work**: For tasks that need a capable model, GreenClaw delegates to Claude Code using an OAuth session tied to a flat-rate Pro subscription. The cost is fixed regardless of usage — no incentive to minimise tokens at the expense of quality, and no surprise bills from heavy use.
 
-**Spend guards on the metered path**: The Haiku API path (the one with per-token billing) has a daily alert threshold and a hard cap. If something goes wrong or usage spikes, it stops rather than runs up a bill.
+**No metered API path**: GreenClaw has no Anthropic API key dependency. There is no paid-per-token path, no spend guards needed, no surprise bills. If something routes to Claude Code and it fails, it fails cleanly — it doesn't fall back to a billing path.
 
-**The fix that started it**: An early version of GreenClaw passed the Anthropic API key to Claude Code subprocesses, causing OAuth-authed Claude Code to fall back to billing API credits. That was caught and fixed — Claude Code now runs in a clean environment without the API key, ensuring it always uses the OAuth session.
+**The fix that started it**: An early version passed the Anthropic API key to Claude Code subprocesses, causing OAuth-authed Claude Code to fall back to billing API credits. That was caught, fixed, and then the metered path removed entirely. Claude Code now runs in a clean environment without the API key, ensuring it always uses the OAuth session.
 
 ---
 

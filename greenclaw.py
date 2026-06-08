@@ -6,12 +6,12 @@ Two front ends, one core:
   python greenclaw.py --telegram   Telegram bot (long-poll)
 
 Per-message channels:
-  <prompt>               -> Claude API loop (MODEL): run_shell / add_note / list_notes
-  gc <prompt> / ask gc   -> hand the whole job to Claude Code (full autonomy)
-  usage / tokens / cost  -> report API token spend (router loop only; cc bills separately)
+  <prompt>               -> Claude Code CLI (OAuth/Pro, full autonomy)
+  gc <prompt>            -> local Ollama (Qwen2.5:3b, free, on-device)
+  usage / tokens / cost  -> CC invocation count
 
-LAN / sole-user box. Secrets in .env (ANTHROPIC_API_KEY, TELEGRAM_*).
-Deps: pip install anthropic   (httpx ships with it — no extra install)
+LAN / sole-user box. Secrets in .env (TELEGRAM_*).
+Deps: pip install httpx
 """
 
 import json
@@ -23,35 +23,16 @@ import threading
 import time
 from datetime import datetime
 
-import anthropic
 import httpx
 
-# Haiku for cheap/fast routine routing. Bump to claude-sonnet-4-6 / claude-opus-4-8 when a task earns it.
-MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS = 8192  # terse router replies; raise if shell output gets truncated
-
-# Local model channel (`g <prompt>`): Ollama on the box — free, for the routine run_shell/notes loop.
+# Local model channel: Ollama on the box — free, for the routine run_shell/notes loop.
 LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "qwen2.5:3b-instruct")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
-LOCAL_NUM_CTX = 8192   # routing needs little; no 64k, no KV-quant
-LOCAL_MAX_STEPS = 8    # tool-loop cap
+LOCAL_NUM_CTX = 8192
+LOCAL_MAX_STEPS = 8
 
 NOTES_FILE = os.path.expanduser("~/notes.md")
-USAGE_FILE = os.path.expanduser("~/greenclaw/usage.jsonl")
 CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
-ALERT_FLAG_FILE = os.path.expanduser("~/greenclaw/alerted.txt")
-
-# Spend guards (Haiku API spend tracked in usage.jsonl; CC billed separately via CC_DAILY_LIMIT)
-SPEND_ALERT = 0.50   # warn when daily Haiku spend crosses this
-SPEND_CAP   = 2.00   # hard-stop Haiku calls above this
-CC_DAILY_LIMIT = 20  # max CC invocations per day
-
-# (input, output) USD per 1M tokens.
-RATES = {
-    "claude-haiku-4-5": (1.0, 5.0),
-    "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-opus-4-8": (5.0, 25.0),
-}
 
 SYSTEM = (
     "You are a terse router agent on Kev's home server (Lenovo M710q, Linux). "
@@ -97,7 +78,6 @@ TOOLS = [
 
 
 def load_env(path=".env"):
-    """Tiny KEY=value loader — no extra deps."""
     if not os.path.exists(path):
         return
     with open(path) as f:
@@ -110,7 +90,6 @@ def load_env(path=".env"):
 
 
 def run_shell(command):
-    """Execute a shell command, return combined result text."""
     try:
         p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60)
         out = p.stdout
@@ -145,24 +124,7 @@ def list_notes():
     return head + "\n".join(tail)
 
 
-def get_daily_spend():
-    """Sum today's Haiku API spend from usage.jsonl."""
-    if not os.path.exists(USAGE_FILE):
-        return 0.0
-    today = datetime.now().strftime("%Y-%m-%d")
-    total = 0.0
-    for line in open(USAGE_FILE):
-        try:
-            r = json.loads(line)
-            if r.get("ts", "").startswith(today):
-                total += r.get("cost", 0.0)
-        except Exception:  # noqa: BLE001
-            continue
-    return total
-
-
 def get_daily_cc_calls():
-    """Count today's CC invocations from cc_calls.jsonl."""
     if not os.path.exists(CC_LOG_FILE):
         return 0
     today = datetime.now().strftime("%Y-%m-%d")
@@ -189,33 +151,26 @@ def log_cc_call(prompt_preview):
         print(f"[cc log error] {e}")
 
 
-def should_alert():
-    """True if alert threshold crossed and not yet alerted today."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    if os.path.exists(ALERT_FLAG_FILE):
-        if open(ALERT_FLAG_FILE).read().strip() == today:
-            return False
-    if get_daily_spend() >= SPEND_ALERT:
-        with open(ALERT_FLAG_FILE, "w") as f:
-            f.write(today)
-        return True
-    return False
+def report_usage():
+    cc_today = get_daily_cc_calls()
+    return f"Claude Code invocations today: {cc_today}"
 
 
 CC_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 
 
 def ask_cc(prompt):
-    """Hand the whole job to Claude Code headless, full autonomy. Bypasses the API loop."""
+    """Hand the whole job to Claude Code headless, full autonomy."""
     if not (shutil.which("claude") or os.path.exists(CC_BIN)):
         return "[error] claude CLI not found"
 
     log_cc_call(prompt)
     print("  [-> Claude Code]")
     try:
+        cc_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         p = subprocess.run(
             [CC_BIN, "-p", prompt, "--model", "claude-sonnet-4-6", "--dangerously-skip-permissions"],
-            capture_output=True, text=True, timeout=900,
+            capture_output=True, text=True, timeout=900, env=cc_env,
         )
         out = (p.stdout or "").strip()
         err = (p.stderr or "").strip()
@@ -226,54 +181,6 @@ def ask_cc(prompt):
         return "[error] Claude Code timed out (15m)"
     except Exception as e:  # noqa: BLE001
         return f"[error] {e}"
-
-
-def _cost(model, u):
-    r_in, r_out = RATES.get(model, (3.0, 15.0))
-    cr = getattr(u, "cache_read_input_tokens", 0) or 0
-    cw = getattr(u, "cache_creation_input_tokens", 0) or 0
-    return (u.input_tokens * r_in + u.output_tokens * r_out
-            + cr * 0.1 * r_in + cw * 1.25 * r_in) / 1e6
-
-
-def log_usage(model, u):
-    try:
-        rec = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "model": model,
-            "in": u.input_tokens, "out": u.output_tokens,
-            "cr": getattr(u, "cache_read_input_tokens", 0) or 0,
-            "cw": getattr(u, "cache_creation_input_tokens", 0) or 0,
-            "cost": round(_cost(model, u), 6),
-        }
-        with open(USAGE_FILE, "a") as f:
-            f.write(json.dumps(rec) + "\n")
-    except Exception as e:  # noqa: BLE001 — never let logging break a reply
-        print(f"[usage log error] {e}")
-
-
-def report_usage():
-    if not os.path.exists(USAGE_FILE):
-        return "no API usage logged yet."
-    today = datetime.now().strftime("%Y-%m-%d")
-    t_cost = t_n = a_cost = a_n = 0
-    a_in = a_out = 0
-    for line in open(USAGE_FILE):
-        try:
-            r = json.loads(line)
-        except Exception:  # noqa: BLE001
-            continue
-        a_cost += r.get("cost", 0); a_n += 1
-        a_in += r.get("in", 0); a_out += r.get("out", 0)
-        if r.get("ts", "").startswith(today):
-            t_cost += r.get("cost", 0); t_n += 1
-    cc_today = get_daily_cc_calls()
-    return (
-        f"API token spend (Haiku loop only — CC jobs bill via Claude Code separately):\n"
-        f"  today: ${t_cost:.4f} over {t_n} calls | alert at ${SPEND_ALERT:.2f} | cap at ${SPEND_CAP:.2f}\n"
-        f"  CC invocations today: {cc_today}/{CC_DAILY_LIMIT}\n"
-        f"  total: ${a_cost:.4f} over {a_n} calls ({a_in:,} in / {a_out:,} out tokens)"
-    )
 
 
 def dispatch_tool(name, inp):
@@ -289,7 +196,6 @@ def dispatch_tool(name, inp):
 
 
 def _ollama_tools():
-    """Convert the Anthropic-style TOOLS list to Ollama's function-tool format, plus CC delegation."""
     tools = [
         {"type": "function", "function": {
             "name": t["name"],
@@ -315,7 +221,7 @@ def _ollama_tools():
 
 
 def converse_local(text):
-    """`g <prompt>`: the run_shell/notes tool loop against local Ollama (granite). Stateless per call, free, no API spend."""
+    """Route to local Ollama — free, on-device, no cloud."""
     msgs = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": text},
@@ -347,74 +253,26 @@ def converse_local(text):
     return "\n".join(parts).strip() or "(no reply)"
 
 
-def converse(client, messages, text):
-    """Handle one user message. Returns reply text; mutates `messages`."""
-    # router-level commands (no model call)
+def route(text):
+    """Shared routing logic for both terminal and Telegram."""
     if text in ("usage", "tokens", "cost"):
         return report_usage()
-    if text.startswith("h "):
-        pass  # fall through to Haiku below
-    elif text.startswith("ask gc "):
-        return ask_cc(text[7:].strip())
-    elif text.startswith("gc "):
-        return ask_cc(text[5:].strip())
-    else:
-        return converse_local(text.strip())  # default: free local Ollama
-    # Haiku spend guard
-    daily = get_daily_spend()
-    if daily >= SPEND_CAP:
-        return f"[blocked] daily Haiku spend cap ${SPEND_CAP:.2f} reached (${daily:.4f} spent). Reset tomorrow."
-
-    messages.append({"role": "user", "content": text})
-    parts = []
-    while True:
-        resp = client.messages.create(
-            model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM, tools=TOOLS, messages=messages
-        )
-        log_usage(MODEL, resp.usage)
-        messages.append({"role": "assistant", "content": resp.content})
-
-        for block in resp.content:
-            if block.type == "text" and block.text.strip():
-                parts.append(block.text)
-
-        if resp.stop_reason != "tool_use":
-            break
-
-        results = []
-        for block in resp.content:
-            if block.type == "tool_use":
-                marker = block.input.get("command") or block.input.get("text") or block.name
-                print(f"  [{block.name}] {marker}")
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": dispatch_tool(block.name, block.input),
-                })
-        messages.append({"role": "user", "content": results})
-
-    reply = "\n".join(parts).strip() or "(no reply)"
-    if should_alert():
-        reply += f"\n\n⚠️ spend alert: Haiku daily spend crossed ${SPEND_ALERT:.2f} (${get_daily_spend():.4f} so far). Cap at ${SPEND_CAP:.2f}."
-    return reply
+    if text.startswith("gc "):
+        return converse_local(text[3:].strip())
+    return ask_cc(text)
 
 
-def run_terminal(client):
-    messages = []
-    print("router ready — type a prompt, 'usage' for spend, Ctrl-D or 'exit' to quit.\n")
+def run_terminal():
+    print("router ready — gc <prompt> for local, anything else via Claude Code. Ctrl-D to quit.\n")
     while True:
         try:
             user = input("> ").strip()
         except EOFError:
             print()
             break
-        if not user:
-            continue
-        if user in ("exit", "quit"):
+        if not user or user in ("exit", "quit"):
             break
-        reply = converse(client, messages, user)
-        if reply is not None:
-            print(reply)
+        print(route(user))
         print()
 
 
@@ -432,13 +290,12 @@ def _mail_check_loop(send, chat):
         time.sleep(3600)
 
 
-def run_telegram(client):
+def run_telegram():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         sys.exit("TELEGRAM_BOT_TOKEN not set in .env")
     allowed = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     api = f"https://api.telegram.org/bot{token}"
-    messages = []
     offset = None
 
     def send(chat, text):
@@ -482,26 +339,15 @@ def run_telegram(client):
                 print(f"[blocked] chat {chat}: {text!r}")
                 continue
             print(f"[tg {chat}] {text}")
-            if text in ("usage", "tokens", "cost"):
-                reply = report_usage()
-            elif text.startswith("gc "):
-                reply = converse_local(text[3:].strip())
-            elif text.startswith("h "):
-                reply = converse(client, messages, text)
-            else:
-                reply = ask_cc(text)
-            send(chat, reply)
+            send(chat, route(text))
 
 
 def main():
     load_env()
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("ANTHROPIC_API_KEY not set — put it in .env or export it.")
-    client = anthropic.Anthropic()
     if "--telegram" in sys.argv[1:]:
-        run_telegram(client)
+        run_telegram()
     else:
-        run_terminal(client)
+        run_terminal()
 
 
 if __name__ == "__main__":
