@@ -25,7 +25,7 @@ import anthropic
 import httpx
 
 # Haiku for cheap/fast routine routing. Bump to claude-sonnet-4-6 / claude-opus-4-8 when a task earns it.
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 8192  # terse router replies; raise if shell output gets truncated
 
 # Local model channel (`g <prompt>`): Ollama on the box — free, for the routine run_shell/notes loop.
@@ -206,12 +206,8 @@ def ask_cc(prompt):
     if not (shutil.which("claude") or os.path.exists(CC_BIN)):
         return "[error] claude CLI not found"
 
-    cc_today = get_daily_cc_calls()
-    if cc_today >= CC_DAILY_LIMIT:
-        return f"[blocked] CC daily limit reached ({CC_DAILY_LIMIT} calls). Reset tomorrow."
-
     log_cc_call(prompt)
-    print(f"  [-> Claude Code, full autonomy — may take a while] (CC call {cc_today + 1}/{CC_DAILY_LIMIT} today)")
+    print("  [-> Claude Code]")
     try:
         p = subprocess.run(
             [CC_BIN, "-p", prompt, "--model", "claude-sonnet-4-6", "--dangerously-skip-permissions"],
@@ -333,11 +329,6 @@ def converse_local(text):
 
 def converse(client, messages, text):
     """Handle one user message. Returns reply text; mutates `messages`."""
-    # sleep window: silent drop 22:00-05:00
-    hour = datetime.now().hour
-    if hour >= 22 or hour < 5:
-        return None
-
     # router-level commands (no model call)
     if text in ("usage", "tokens", "cost"):
         return report_usage()
@@ -456,9 +447,15 @@ def run_telegram(client):
                 print(f"[blocked] chat {chat}: {text!r}")
                 continue
             print(f"[tg {chat}] {text}")
-            reply = converse(client, messages, text)
-            if reply is not None:
-                send(chat, reply)
+            if text in ("usage", "tokens", "cost"):
+                reply = report_usage()
+            elif text.startswith("iris "):
+                reply = converse_local(text[5:].strip())
+            elif text.startswith("h "):
+                reply = converse(client, messages, text)
+            else:
+                reply = ask_cc(text)
+            send(chat, reply)
 
 
 def main():
