@@ -19,6 +19,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 
 import anthropic
@@ -398,6 +400,20 @@ def run_terminal(client):
         print()
 
 
+def _mail_check_loop(send, chat):
+    """Background thread: hourly email check via CC."""
+    time.sleep(3600)
+    while True:
+        print("[hourly] checking mail via CC")
+        reply = ask_cc(
+            "Check my Gmail for any new emails received in the last hour. "
+            "Summarise anything that needs attention — sender, subject, one line. "
+            "If nothing worth flagging just say: No new mail."
+        )
+        send(chat, reply)
+        time.sleep(3600)
+
+
 def run_telegram(client):
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -418,6 +434,7 @@ def run_telegram(client):
 
     if allowed:
         print(f"telegram bot running — locked to chat {allowed}")
+        threading.Thread(target=_mail_check_loop, args=(send, allowed), daemon=True).start()
     else:
         print("telegram bot running — UNLOCKED: reports chat ids only, executes nothing. "
               "Message it, set TELEGRAM_CHAT_ID in .env, restart.")
