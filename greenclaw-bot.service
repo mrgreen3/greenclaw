@@ -1,0 +1,15 @@
+[Unit]
+Description=GreenClaw - Telegram Claude bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/greenclaw
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/greenclaw/.venv/bin/python %h/greenclaw/greenclaw.py --telegram
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
