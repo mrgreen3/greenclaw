@@ -84,16 +84,15 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 git clone git@github.com:mrgreen3/greenclaw.git
 cd greenclaw
 python -m venv .venv && source .venv/bin/activate
-pip install anthropic httpx
+pip install httpx
 cp .env.example .env   # fill in your keys
 ```
 
 ### `.env`
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...   # only needed for the h (Haiku) path
 TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...           # your Telegram user ID — locks the bot to you only
+TELEGRAM_CHAT_ID=...   # your Telegram user ID — locks the bot to you only
 ```
 
 To find your chat ID: leave `TELEGRAM_CHAT_ID` blank, start the bot, message it — it will report your ID. Set it and restart.
@@ -132,7 +131,6 @@ systemctl --user restart greenclaw-bot.service
 |------|---------|
 | `greenclaw.py` | Everything — single file, intentional |
 | `.env` | Secrets — never commit this |
-| `usage.jsonl` | Anthropic API token spend log |
 | `cc_calls.jsonl` | Claude Code invocation log |
 | `~/notes.md` | Notes written via `add_note` tool |
 
