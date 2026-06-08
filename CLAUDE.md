@@ -1,24 +1,24 @@
-# Iris (Greenwire) — Developer Context
+# GreenClaw — Developer Context
 
-Iris is Kev's personal Telegram→AI bridge running on Lenovo M710q (192.168.1.64, Arch Linux).
-Single file: `iris.py` (~476 lines). Lean, auditable. Do not add unnecessary abstraction.
+GreenClaw is Kev's personal Telegram→AI bridge running on Lenovo M710q (192.168.1.64, Arch Linux).
+Single file: `greenclaw.py` (~476 lines). Lean, auditable. Do not add unnecessary abstraction.
 
 ## Architecture
 
 ```
 Telegram message
     │
-    ├── "iris <query>"          →  converse_local() → Ollama (qwen2.5:3b-instruct, local, no CC)
-    ├── "h <prompt>"            →  converse()       → Anthropic API (haiku, paid — high-burn fallback)
+    ├── "gc <query>"             →  converse_local() → Ollama (qwen2.5:3b-instruct, local, no CC)
+    ├── "h <prompt>"             →  converse()       → Anthropic API (haiku, paid — high-burn fallback)
     ├── "usage" / "tokens" / "cost"  →  report_usage()
     │
-    └── anything else           →  ask_cc()         → claude CLI (CC, sonnet, free via Pro sub)
+    └── anything else            →  ask_cc()         → claude CLI (CC, sonnet, free via Pro sub)
 ```
 
 Qwen monitors 24/7. CC is invoked per-message as a one-shot subprocess (not persistent).
 No quiet hours. No CC daily call limit.
 
-## Key constants (top of iris.py)
+## Key constants (top of greenclaw.py)
 
 | Var | Value | Purpose |
 |-----|-------|---------|
@@ -46,22 +46,20 @@ elif text.startswith("/weather"):
 
 ```bash
 # Check running
-ps aux | grep iris.py
+systemctl --user status greenclaw-bot.service
 
-# Restart (after edits)
-pkill -f iris.py
-cd ~/iris && PYTHONUNBUFFERED=1 setsid bash -c 'source .venv/bin/activate && exec python3 iris.py --telegram >> /tmp/iris.log 2>&1' &
+# Restart
+systemctl --user restart greenclaw-bot.service
 
 # Logs
-cat /tmp/iris.log
-tail -f /tmp/iris.log
+journalctl --user -u greenclaw-bot.service -f
 ```
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `iris.py` | Everything — single file intentional |
+| `greenclaw.py` | Everything — single file intentional |
 | `.env` | `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `TELEGRAM_CHAT_ID` |
 | `usage.jsonl` | Anthropic API token spend log |
 | `cc_calls.jsonl` | CC invocation log |
