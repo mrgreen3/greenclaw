@@ -110,7 +110,11 @@ python greenclaw.py --telegram
 ### Systemd service
 
 ```bash
-# Install and enable
+# Install the service file
+cp greenclaw-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+
+# Enable and start
 systemctl --user enable --now greenclaw-bot.service
 
 # Survive logout
