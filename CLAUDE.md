@@ -1,6 +1,6 @@
 # GreenClaw — Developer Context
 
-GreenClaw is Kev's personal Telegram→AI bridge running on Lenovo M710q (192.168.1.64, Arch Linux).
+GreenClaw is Kev's personal Telegram→AI bridge running on Lenovo M710q (Arch Linux).
 Single file: `greenclaw.py` (~476 lines). Lean, auditable. Do not add unnecessary abstraction.
 
 ## Architecture
@@ -9,7 +9,6 @@ Single file: `greenclaw.py` (~476 lines). Lean, auditable. Do not add unnecessar
 Telegram message
     │
     ├── "gc <query>"             →  converse_local() → Ollama (qwen2.5:3b-instruct, local, no CC)
-    ├── "h <prompt>"             →  converse()       → Anthropic API (haiku, paid — high-burn fallback)
     ├── "usage" / "tokens" / "cost"  →  report_usage()
     │
     └── anything else            →  ask_cc()         → claude CLI (CC, sonnet, free via Pro sub)
@@ -22,7 +21,7 @@ No quiet hours. No CC daily call limit.
 
 | Var | Value | Purpose |
 |-----|-------|---------|
-| `MODEL` | `claude-haiku-4-5-20251001` | Anthropic API model (paid path) |
+| `MODEL` | `claude-sonnet-4-6` | Claude Code model (CC path) |
 | `LOCAL_MODEL` | `qwen2.5:3b-instruct` | Ollama model (default free path) |
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Local Ollama endpoint |
 | `CC_BIN` | `~/.local/bin/claude` | Claude Code CLI binary |
@@ -40,7 +39,6 @@ elif text.startswith("/weather"):
 
 **Tool for local model** — add to `_ollama_tools()` and handle in `dispatch_tool()`.
 
-**Tool for Haiku path** — add to `TOOLS` list and handle in the tool dispatch loop inside `converse()`.
 
 ## Running / restarting
 
