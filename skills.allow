@@ -1,4 +1,5 @@
 # Skills marked `locked: true` only run if their name is listed here (one per line).
 # Lines starting with # are ignored. Edit, then restart the service to apply.
+mail
 # To arm the blog-post skill, uncomment the next line:
 # blog-post
