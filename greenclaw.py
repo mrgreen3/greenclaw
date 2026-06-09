@@ -31,6 +31,13 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
 LOCAL_NUM_CTX = 8192
 LOCAL_MAX_STEPS = 8
 
+# Hourly Gmail check pauses overnight (local time). Window wraps past midnight.
+REST_START = 22  # inclusive — stop checking at 22:00
+REST_END = 5     # exclusive — resume at 05:00
+
+# Cap run_shell output so a chatty command can't blow the local context or Telegram.
+SHELL_MAX_OUTPUT = 6000  # chars
+
 NOTES_FILE = os.path.expanduser("~/notes.md")
 CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
 
@@ -89,6 +96,15 @@ def load_env(path=".env"):
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def _truncate(text, limit=SHELL_MAX_OUTPUT):
+    """Keep head and tail when output is too long; the exit line lives in the tail."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    omitted = len(text) - limit
+    return f"{text[:half]}\n... [truncated {omitted} chars] ...\n{text[-half:]}"
+
+
 def run_shell(command):
     try:
         p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60)
@@ -96,7 +112,7 @@ def run_shell(command):
         if p.stderr:
             out += "\n[stderr]\n" + p.stderr
         out += f"\n[exit {p.returncode}]"
-        return out.strip()
+        return _truncate(out.strip())
     except subprocess.TimeoutExpired:
         return "[error] command timed out (60s)"
     except Exception as e:  # noqa: BLE001
@@ -276,17 +292,28 @@ def run_terminal():
         print()
 
 
+def in_rest_hours(now=None):
+    """True if the current hour is within the overnight quiet window (handles wrap)."""
+    h = (now or datetime.now()).hour
+    if REST_START <= REST_END:
+        return REST_START <= h < REST_END
+    return h >= REST_START or h < REST_END  # window wraps past midnight
+
+
 def _mail_check_loop(send, chat):
-    """Background thread: hourly email check via CC."""
+    """Background thread: hourly Gmail check via CC, paused overnight (REST_START–REST_END)."""
     time.sleep(3600)
     while True:
-        print("[hourly] checking mail via CC")
-        reply = ask_cc(
-            "Check my Gmail for any new emails received in the last hour. "
-            "Summarise anything that needs attention — sender, subject, one line. "
-            "If nothing worth flagging just say: No new mail."
-        )
-        send(chat, reply)
+        if in_rest_hours():
+            print("[hourly] rest hours — skipping mail check")
+        else:
+            print("[hourly] checking mail via CC")
+            reply = ask_cc(
+                "Check my Gmail for any new emails received in the last hour. "
+                "Summarise anything that needs attention — sender, subject, one line. "
+                "If nothing worth flagging just say: No new mail."
+            )
+            send(chat, reply)
         time.sleep(3600)
 
 
@@ -320,6 +347,7 @@ def run_telegram():
             updates = r.json().get("result", [])
         except Exception as e:  # noqa: BLE001
             print(f"[poll error] {e}")
+            time.sleep(5)
             continue
 
         for upd in updates:
