@@ -14,7 +14,7 @@ Single Python file. Lean, auditable, yours.
 
 GreenClaw sits on a headless Lenovo M710q (Arch Linux, ~10W idle) and listens for Telegram messages via long-poll. Each message is routed to the right AI backend depending on what you need. Results come back to Telegram.
 
-It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone.
+It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone. New capabilities are added as [skills](#skills): markdown recipes you drop in a folder, no code changes.
 
 ---
 
@@ -26,6 +26,7 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 |--------|---------|------|
 | _(anything)_ | Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
 | `gc <prompt>` | Local Ollama (Qwen2.5:3b) | Free — runs on the box |
+| `/<trigger> …` | A skill recipe (see [Skills](#skills)) | Free or subscription, per skill |
 | `usage` / `tokens` / `cost` | CC invocation count | — |
 
 **Default path** (no prefix) delegates to Claude Code running headlessly on the server. Claude Code uses your claude.ai Pro OAuth session — no API credits consumed.
@@ -46,12 +47,43 @@ Claude Code (default path) has full autonomy: web search, file access, GitHub, e
 Telegram message
     │
     ├── gc <prompt>     →  Ollama (local, Qwen2.5:3b)  →  free
+    ├── /<trigger> …    →  matching skill recipe       →  local or CC, per skill
     ├── usage           →  CC invocation count
     │
     └── anything else   →  Claude Code CLI (OAuth/Pro)  →  subscription
 ```
 
 Runs as a systemd user service. Survives reboots and SSH disconnects.
+
+---
+
+## Skills
+
+Skills are how you add new capabilities **without touching the code**. The gateway stays static; you drop a markdown file in `skills/`, restart, and it's live.
+
+A skill is a recipe — instructions the assistant follows — not a plugin or a chunk of code. Claude Code already has the muscle (shell, web, GitHub, email); a skill just tells it what to do. They're plain markdown with a small front-matter block:
+
+```markdown
+---
+name: system-health
+description: Check disk, memory, load, and the bot service. Use when Kev asks how the box is doing.
+exposes: local          # local (Qwen) | cc (Claude Code) | both
+trigger: /health        # the command that runs it
+locked: false           # true = must be armed in skills.allow before it runs
+source: kev             # who wrote it — for auditing
+---
+
+Run df -h, free -h and uptime, then summarise in a few lines.
+Flag anything that looks off. Don't suggest fixes unless something's wrong.
+```
+
+Send `/health` and the recipe runs. Anything you type after the trigger is passed straight through as input, so `/post write about the M710q build` hands that prompt to the `blog-post` skill.
+
+**Loaded lean.** At startup the gateway reads only each skill's front matter — never the body — so skills don't eat into the local model's context just by existing. The full recipe is loaded from disk only on the turn it actually runs.
+
+**The lock.** A skill marked `locked: true` won't run unless its name is listed in `skills.allow`. That's the safety catch for anything with reach — destructive commands, anything touching external accounts. The shipped `blog-post` skill is locked by default; uncomment it in `skills.allow` and restart to arm it. To see exactly what the bot can do right now: `cat skills.allow` plus the boot log, which prints what loaded and what was blocked.
+
+**Adding one.** Write `skills/my-thing.md`, restart the service. That's the whole workflow.
 
 ---
 
@@ -150,7 +182,9 @@ systemctl --user restart greenclaw-bot.service
 
 | File | Purpose |
 |------|---------|
-| `greenclaw.py` | Everything — single file, intentional |
+| `greenclaw.py` | The gateway — single file, intentional |
+| `skills/` | Skill recipes (`*.md`) — add capabilities here, no code |
+| `skills.allow` | Arms `locked` skills — one name per line |
 | `.env` | Secrets — never commit this |
 | `cc_calls.jsonl` | Claude Code invocation log |
 | `~/notes.md` | Notes written via `add_note` tool |
@@ -167,11 +201,13 @@ Lenovo M710q Tiny — Intel Core i5, 16GB RAM, 234GB NVMe, running SwayBang Linu
 
 GreenClaw is a few days old and actively being shaped. Things being explored:
 
-- Skills system — drop in `.md` files to add new capabilities
+- Skills v2 — let the local model pick a skill from a description menu, on top of the explicit triggers that work today
 - System management tasks (updates, cache clearing, health checks)
 - Smarter routing between local and cloud models
 - Hardware tier guide — Pi 4, mini PC, old laptop
 - Easier first-run setup
+
+Done so far: the [skills](#skills) system (static gateway, markdown recipes, explicit triggers, lock file).
 
 ---
 
