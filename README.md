@@ -69,6 +69,8 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 
 **No metered API path**: GreenClaw has no Anthropic API key dependency. There is no paid-per-token path, no spend guards needed, no surprise bills. If something routes to Claude Code and it fails, it fails cleanly — it doesn't fall back to a billing path.
 
+**Sleeps when you do**: The optional hourly Gmail digest pauses overnight (22:00–05:00 by default, set via `REST_START`/`REST_END`). The box doesn't wake the cloud model to summarise mail while you're asleep — work tracks the hours you're actually around to act on it.
+
 **The fix that started it**: An early version passed the Anthropic API key to Claude Code subprocesses, causing OAuth-authed Claude Code to fall back to billing API credits. That was caught, fixed, and then the metered path removed entirely. Claude Code now runs in a clean environment without the API key, ensuring it always uses the OAuth session.
 
 ---
@@ -109,6 +111,8 @@ TELEGRAM_CHAT_ID=...   # your Telegram user ID — locks the bot to you only
 ```
 
 To find your chat ID: leave `TELEGRAM_CHAT_ID` blank, start the bot, message it — it will report your ID. Set it and restart.
+
+> **Security model**: access is gated on your Telegram chat ID, and the bot can run shell commands and drive Claude Code with `--dangerously-skip-permissions`. In practice that means the bot token is the key to the box — anyone holding it can reach it. Treat it like a root password. This is fine for a sole-user box on a private network (Tailscale here); it is not hardened for wider exposure.
 
 ### Run
 
