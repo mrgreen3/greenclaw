@@ -1,29 +1,38 @@
 # GreenClaw — Developer Context
 
 GreenClaw is Kev's personal Telegram→AI bridge running on a Lenovo M710q (Arch Linux).
-Single file: `greenclaw.py` (~330 lines). Lean, auditable. Do not add unnecessary abstraction.
+Single file: `greenclaw.py` (~465 lines), plus `skills/*.md`. Lean, auditable. Do not
+add unnecessary abstraction.
 
 ## Architecture
 
 ```
 Telegram message (or terminal stdin)
     │
-    ├── "gc <query>"                 →  converse_local() → Ollama (qwen2.5:3b-instruct, local, free)
+    ├── "/<trigger> …"               →  run_skill()      → skill recipe (local or CC, per `exposes`)
+    ├── "cc <query>"                 →  ask_cc()         → claude CLI (Claude Code, OAuth/Pro) — forced
+    ├── "gc <query>"                 →  converse_local() → Ollama (qwen2.5:3b-instruct) — forced
     ├── "usage" / "tokens" / "cost"  →  report_usage()   → CC invocation count for today
     │
-    └── anything else                →  ask_cc()         → claude CLI (Claude Code, OAuth/Pro)
+    └── anything else                →  converse_local() → Qwen first; it calls delegate_to_cc when it needs more reach
 ```
 
 `route(text)` is the single dispatch point, shared by both front ends
-(`run_terminal()` and `run_telegram()`). Qwen runs on the box for the free path;
-Claude Code is invoked per-message as a one-shot subprocess (not persistent),
-using the claude.ai Pro OAuth session — there is **no Anthropic API key path**.
+(`run_terminal()` and `run_telegram()`). **Qwen-first:** an un-prefixed message goes
+to the local model, which delegates to Claude Code (via the `delegate_to_cc` tool)
+only when it needs reach it lacks. Claude Code is invoked per-message as a one-shot
+subprocess (`claude -p`, not persistent), using the claude.ai Pro OAuth session —
+there is **no Anthropic API key path**.
 
-No CC daily call limit. The Telegram front end also runs an hourly Gmail check
-in a background thread (`_mail_check_loop`), which pauses overnight during the
-rest window (`REST_START`–`REST_END`, default 22:00–05:00 local) so Claude Code
-isn't woken while Kev sleeps. The post-rest check still only covers the last
-hour, so overnight mail is not retro-summarised at wake.
+## Nothing runs on a timer — important
+
+Claude Code runs ONLY in response to a message or a triggered skill. There is no
+background loop, no scheduled/cron CC invocation, no inbox polling. This is
+deliberate: headless `claude -p` is automated use, which (a) sits outside "ordinary
+individual" subscription use and (b) from 2026-06-15 draws a separate paid Agent SDK
+credit pool rather than the Pro subscription. Do NOT add timers, daemons, or
+background threads that call `ask_cc()`. (An earlier hourly Gmail loop was removed for
+exactly this reason.) Mail is on-demand via the `/mail` skill.
 
 ## No metered path — important
 
@@ -34,16 +43,37 @@ not reintroduce an API-key path, a spend cap, or a usage/token spend log — tho
 were removed on purpose. The only invocation record kept is `cc_calls.jsonl`
 (a count of CC calls, no token data).
 
+## Skills
+
+Capability lives in `skills/*.md` — markdown recipes, not code. The gateway stays
+static; adding a capability = drop a file + restart, never edit `route()`.
+
+- `load_skills()` (called in `main()`) indexes `skills/*.md` at boot reading ONLY
+  front matter (first 4 KB). Bodies are never read at boot.
+- `run_skill()` loads a body on demand when a trigger fires — progressive disclosure,
+  so skills don't crowd Qwen's 8k context at rest.
+- Front matter: `name`, `description`, `exposes` (`local` | `cc` | `both`),
+  `trigger` (e.g. `/health`), `locked` (`true` → must be listed in `skills.allow`),
+  `source`. v1 is explicit-trigger only (`match_skill_trigger()` matches the first
+  whitespace token); text after the trigger is passed through as freeform input.
+  Model-selection from descriptions is the planned v2.
+- Lock: `skills.allow` (one name per line, `#` comments) arms `locked: true` skills.
+  Boot logs `[skills] loaded …` and `[skills] blocked …`.
+- Shipped: `system-health` (local, unlocked), `mail` (cc, locked, armed, read-only),
+  `blog-post` (cc, locked, NOT armed by default).
+
 ## Key constants (top of greenclaw.py)
 
 | Var | Value | Purpose |
 |-----|-------|---------|
-| `LOCAL_MODEL` | `qwen2.5:3b-instruct` | Ollama model (the `gc` free path) |
+| `LOCAL_MODEL` | `qwen2.5:3b-instruct` | Ollama model (the Qwen-first local path) |
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Local Ollama endpoint |
 | `LOCAL_NUM_CTX` | `8192` | Ollama context window |
 | `LOCAL_MAX_STEPS` | `8` | Max tool-call loop iterations for the local model |
-| `REST_START` / `REST_END` | `22` / `5` | Overnight quiet window for the mail loop (handles midnight wrap) |
 | `SHELL_MAX_OUTPUT` | `6000` | Char cap on `run_shell` output (head+tail via `_truncate`) |
+| `SKILLS_DIR` | `<dir>/skills` | Where skill recipes live |
+| `SKILLS_ALLOW` | `<dir>/skills.allow` | Arms `locked` skills |
+| `SKILL_BODY_WARN` | `6000` | Warn (don't refuse) if a local skill body is large for Qwen |
 | `NOTES_FILE` | `~/notes.md` | Where `add_note`/`list_notes` read and write |
 | `CC_LOG_FILE` | `~/greenclaw/cc_calls.jsonl` | CC invocation log (count only) |
 | `CC_BIN` | `claude` on PATH, else `~/.local/bin/claude` | Claude Code CLI binary |
@@ -55,20 +85,25 @@ in more than one place later, promote it to a constant then.
 ## Tools
 
 `run_shell`, `add_note`, and `list_notes` are defined in the `TOOLS` list and
-dispatched by `dispatch_tool()`. The local model additionally gets
-`delegate_to_cc` (added in `_ollama_tools()`), which lets Qwen hand a task to
-Claude Code for anything needing external access it lacks (Gmail, web, APIs).
+dispatched by `dispatch_tool()`. The local model additionally gets `delegate_to_cc`
+(added in `_ollama_tools()`), which lets Qwen hand a task to Claude Code for anything
+needing external reach it lacks (Gmail, web, GitHub, APIs). This is the escalation
+path the Qwen-first default relies on.
 
 ## Adding a feature
 
-**Simple command** — add a branch in `route()` before the final `ask_cc()` fallthrough:
+**Most things: write a skill, not code.** Add `skills/<name>.md` with front matter and
+a recipe body, arm it in `skills.allow` if `locked`, restart. No code change.
+
+**New top-level prefix/command** (rare) — add a branch in `route()` before the final
+`converse_local(text)` default:
 ```python
-elif text.startswith("/weather"):
+if text.startswith("/weather"):
     location = text[len("/weather"):].strip() or "London"
     return get_weather(location)  # implement above route()
 ```
 
-**Tool for the local model** — add the schema to the `TOOLS` list (and, if it's
+**New tool for the local model** — add the schema to the `TOOLS` list (and, if it's
 local-only, to `_ollama_tools()`), then handle it in `dispatch_tool()`.
 
 ## Running / restarting
@@ -77,10 +112,10 @@ local-only, to `_ollama_tools()`), then handle it in `dispatch_tool()`.
 # Check running
 systemctl --user status greenclaw-bot.service
 
-# Restart (do this after any code change)
+# Restart (do this after any code OR skill change)
 systemctl --user restart greenclaw-bot.service
 
-# Logs
+# Logs (watch the [skills] boot lines)
 journalctl --user -u greenclaw-bot.service -f
 ```
 
@@ -88,7 +123,9 @@ journalctl --user -u greenclaw-bot.service -f
 
 | File | Purpose |
 |------|---------|
-| `greenclaw.py` | Everything — single file, intentional |
+| `greenclaw.py` | The gateway — single file, intentional |
+| `skills/` | Skill recipes (`*.md`) — add capabilities here, no code |
+| `skills.allow` | Arms `locked` skills — one name per line |
 | `.env` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (no API key) |
 | `cc_calls.jsonl` | Claude Code invocation log (count only) |
 | `~/notes.md` | Persistent notes written via `add_note` |
@@ -96,7 +133,9 @@ journalctl --user -u greenclaw-bot.service -f
 ## Rules
 
 - Keep it single-file. No new modules without good reason.
-- No metered/API-key path. OAuth only. (See "No metered path" above.)
+- Prefer a skill over code. Only edit `route()` for genuinely new top-level routing.
+- No metered/API-key path. OAuth only. (See "No metered path".)
+- Nothing on a timer. No scheduled/background CC calls. (See "Nothing runs on a timer".)
 - No features beyond what Kev asks for.
 - Test by restarting the service and sending a Telegram message.
 - Confirm before anything destructive.
