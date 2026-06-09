@@ -19,8 +19,11 @@ Telegram message (or terminal stdin)
 Claude Code is invoked per-message as a one-shot subprocess (not persistent),
 using the claude.ai Pro OAuth session — there is **no Anthropic API key path**.
 
-No quiet hours. No CC daily call limit. The Telegram front end also runs an
-hourly Gmail check in a background thread (`_mail_check_loop`).
+No CC daily call limit. The Telegram front end also runs an hourly Gmail check
+in a background thread (`_mail_check_loop`), which pauses overnight during the
+rest window (`REST_START`–`REST_END`, default 22:00–05:00 local) so Claude Code
+isn't woken while Kev sleeps. The post-rest check still only covers the last
+hour, so overnight mail is not retro-summarised at wake.
 
 ## No metered path — important
 
@@ -39,6 +42,8 @@ were removed on purpose. The only invocation record kept is `cc_calls.jsonl`
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Local Ollama endpoint |
 | `LOCAL_NUM_CTX` | `8192` | Ollama context window |
 | `LOCAL_MAX_STEPS` | `8` | Max tool-call loop iterations for the local model |
+| `REST_START` / `REST_END` | `22` / `5` | Overnight quiet window for the mail loop (handles midnight wrap) |
+| `SHELL_MAX_OUTPUT` | `6000` | Char cap on `run_shell` output (head+tail via `_truncate`) |
 | `NOTES_FILE` | `~/notes.md` | Where `add_note`/`list_notes` read and write |
 | `CC_LOG_FILE` | `~/greenclaw/cc_calls.jsonl` | CC invocation log (count only) |
 | `CC_BIN` | `claude` on PATH, else `~/.local/bin/claude` | Claude Code CLI binary |
