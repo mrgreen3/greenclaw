@@ -6,8 +6,10 @@ Two front ends, one core:
   python greenclaw.py --telegram   Telegram bot (long-poll)
 
 Per-message channels:
-  <prompt>               -> Claude Code CLI (OAuth/Pro, full autonomy)
-  gc <prompt>            -> local Ollama (Qwen2.5:3b, free, on-device)
+  <prompt>               -> Qwen first (local); it delegates to Claude Code when needed
+  cc <prompt>            -> force Claude Code CLI (OAuth/Pro, full autonomy)
+  gc <prompt>            -> force local Ollama (Qwen2.5:3b, free, on-device)
+  /<trigger> ...         -> a skill recipe from skills/
   usage / tokens / cost  -> CC invocation count
 
 LAN / sole-user box. Secrets in .env (TELEGRAM_*).
@@ -19,7 +21,6 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime
 
@@ -30,10 +31,6 @@ LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "qwen2.5:3b-instruct")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
 LOCAL_NUM_CTX = 8192
 LOCAL_MAX_STEPS = 8
-
-# Hourly Gmail check pauses overnight (local time). Window wraps past midnight.
-REST_START = 22  # inclusive — stop checking at 22:00
-REST_END = 5     # exclusive — resume at 05:00
 
 # Cap run_shell output so a chatty command can't blow the local context or Telegram.
 SHELL_MAX_OUTPUT = 6000  # chars
@@ -50,11 +47,16 @@ SKILL_BODY_WARN = 6000  # chars; warn if a local skill body is large for Qwen's 
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
 
 SYSTEM = (
-    "You are a terse router agent on Kev's home server (Lenovo M710q, Linux). "
-    "Use run_shell to inspect the box and carry out tasks. Use add_note to jot "
-    "something down when Kev says remember/note/jot, and list_notes to read them "
-    "back. Use delegate_to_cc for anything requiring external access you lack — "
-    "Gmail, web search, calendar, APIs — never say you can't do it, just delegate. "
+    "You are the first responder on Kev's home server (Lenovo M710q, Linux). "
+    "You are a small local model: handle simple things yourself and be honest about your limits. "
+    "Use run_shell to inspect the box or run commands. Use add_note when Kev says "
+    "remember/note/jot, and list_notes to read them back. "
+    "Delegate to Claude Code via delegate_to_cc WHENEVER a request needs reach you "
+    "don't have — email/Gmail, the web, GitHub, calendar, APIs, or any multi-step or "
+    "complex task. In particular, if Kev asks about email, his inbox, messages, or "
+    "whether someone has written, replied or been in touch, call delegate_to_cc. "
+    "When you delegate, pass a complete, specific instruction that includes Kev's "
+    "original request. Never invent things you can't actually access — delegate instead. "
     "Be concise — lead with the answer. Confirm before anything destructive."
 )
 
@@ -368,19 +370,26 @@ def run_skill(skill, text):
 
 
 def route(text):
-    """Shared routing logic for both terminal and Telegram."""
+    """Shared routing logic for both terminal and Telegram.
+
+    Qwen-first: with no prefix, the local model handles it and delegates to Claude
+    Code itself when it needs more reach. `cc ` forces Claude Code; `gc ` forces local.
+    """
     if text in ("usage", "tokens", "cost"):
         return report_usage()
     skill = match_skill_trigger(text)
     if skill:
         return run_skill(skill, text)
+    if text.startswith("cc "):
+        return ask_cc(text[3:].strip())
     if text.startswith("gc "):
         return converse_local(text[3:].strip())
-    return ask_cc(text)
+    return converse_local(text)  # default: Qwen first, delegates to CC when needed
 
 
 def run_terminal():
-    print("router ready — gc <prompt> for local, anything else via Claude Code. Ctrl-D to quit.\n")
+    print("router ready — Qwen handles messages and calls Claude Code when needed. "
+          "Prefix `cc ` to force Claude Code, `gc ` to force local. Ctrl-D to quit.\n")
     while True:
         try:
             user = input("> ").strip()
@@ -391,31 +400,6 @@ def run_terminal():
             break
         print(route(user))
         print()
-
-
-def in_rest_hours(now=None):
-    """True if the current hour is within the overnight quiet window (handles wrap)."""
-    h = (now or datetime.now()).hour
-    if REST_START <= REST_END:
-        return REST_START <= h < REST_END
-    return h >= REST_START or h < REST_END  # window wraps past midnight
-
-
-def _mail_check_loop(send, chat):
-    """Background thread: hourly Gmail check via CC, paused overnight (REST_START–REST_END)."""
-    time.sleep(3600)
-    while True:
-        if in_rest_hours():
-            print("[hourly] rest hours — skipping mail check")
-        else:
-            print("[hourly] checking mail via CC")
-            reply = ask_cc(
-                "Check my Gmail for any new emails received in the last hour. "
-                "Summarise anything that needs attention — sender, subject, one line. "
-                "If nothing worth flagging just say: No new mail."
-            )
-            send(chat, reply)
-        time.sleep(3600)
 
 
 def run_telegram():
@@ -437,7 +421,6 @@ def run_telegram():
 
     if allowed:
         print(f"telegram bot running — locked to chat {allowed}")
-        threading.Thread(target=_mail_check_loop, args=(send, allowed), daemon=True).start()
     else:
         print("telegram bot running — UNLOCKED: reports chat ids only, executes nothing. "
               "Message it, set TELEGRAM_CHAT_ID in .env, restart.")
