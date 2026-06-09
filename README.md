@@ -24,14 +24,15 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 
 | Prefix | Goes to | Cost |
 |--------|---------|------|
-| _(anything)_ | Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
-| `gc <prompt>` | Local Ollama (Qwen2.5:3b) | Free — runs on the box |
+| _(anything)_ | Qwen first — delegates to Claude Code when it needs more reach | Free unless it delegates |
+| `cc <prompt>` | Forces Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
+| `gc <prompt>` | Forces local Ollama (Qwen2.5:3b) | Free — runs on the box |
 | `/<trigger> …` | A skill recipe (see [Skills](#skills)) | Free or subscription, per skill |
 | `usage` / `tokens` / `cost` | CC invocation count | — |
 
-**Default path** (no prefix) delegates to Claude Code running headlessly on the server. Claude Code uses your claude.ai Pro OAuth session — no API credits consumed.
+**Default path** (no prefix) goes to the local model first. Qwen handles what it can on the box and delegates to Claude Code itself when a request needs more reach — email, the web, GitHub, or anything multi-step. Claude Code runs headlessly via your claude.ai Pro OAuth session, only when something actually calls for it.
 
-**`gc` path** runs Qwen2.5:3b-instruct locally via Ollama. Zero cloud, zero cost, instant for routine tasks like checking system state or running commands.
+**Force a model** when you want to skip the triage: `cc <prompt>` goes straight to Claude Code, `gc <prompt>` stays on local Qwen. Qwen is zero cloud, zero cost — instant for routine tasks like checking system state or running commands.
 
 ### Tools available to the AI
 
@@ -39,18 +40,19 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 - `add_note` — append a timestamped note to `~/notes.md`
 - `list_notes` — read notes back
 
-Claude Code (default path) has full autonomy: web search, file access, GitHub, email, anything Claude Code can do.
+Claude Code has full autonomy: web search, file access, GitHub, email, anything Claude Code can do.
 
 ### Architecture
 
 ```
 Telegram message
     │
-    ├── gc <prompt>     →  Ollama (local, Qwen2.5:3b)  →  free
     ├── /<trigger> …    →  matching skill recipe       →  local or CC, per skill
+    ├── cc <prompt>     →  Claude Code CLI (OAuth/Pro)  →  forced
+    ├── gc <prompt>     →  Ollama (local, Qwen2.5:3b)   →  forced
     ├── usage           →  CC invocation count
     │
-    └── anything else   →  Claude Code CLI (OAuth/Pro)  →  subscription
+    └── anything else   →  Qwen first  →  delegates to Claude Code only when needed
 ```
 
 Runs as a systemd user service. Survives reboots and SSH disconnects.
@@ -95,13 +97,13 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 
 **No GPU**: Most personal AI setups assume you need a GPU. GreenClaw doesn't — it routes to the right tool for the job rather than running a large local model constantly.
 
-**Local first where it fits**: The `gc` path runs Qwen2.5:3b on-device via Ollama. For simple tasks — check a log, run a command, look something up — it never leaves the house. No API call, no cloud inference, no energy spent in a data centre.
+**Local first by default**: Qwen2.5:3b runs on-device via Ollama and is the first responder for every message. For simple tasks — check a log, run a command, look something up — it never leaves the house. No API call, no cloud inference, no energy spent in a data centre.
 
 **Subscription over metered for heavy work**: For tasks that need a capable model, GreenClaw delegates to Claude Code using an OAuth session tied to a flat-rate Pro subscription. The cost is fixed regardless of usage — no incentive to minimise tokens at the expense of quality, and no surprise bills from heavy use.
 
 **No metered API path**: GreenClaw has no Anthropic API key dependency. There is no paid-per-token path, no spend guards needed, no surprise bills. If something routes to Claude Code and it fails, it fails cleanly — it doesn't fall back to a billing path.
 
-**Sleeps when you do**: The optional hourly Gmail digest pauses overnight (22:00–05:00 by default, set via `REST_START`/`REST_END`). The box doesn't wake the cloud model to summarise mail while you're asleep — work tracks the hours you're actually around to act on it.
+**Nothing runs on a timer**: GreenClaw never wakes the cloud model on a schedule. There's no background polling of your inbox, no cron job quietly burning through your subscription while you sleep. Claude Code runs only when a message — or a skill you triggered — actually needs it. Want your mail summarised? Ask (`/mail`), and it happens then, not every hour whether you're looking or not.
 
 **The fix that started it**: An early version passed the Anthropic API key to Claude Code subprocesses, causing OAuth-authed Claude Code to fall back to billing API credits. That was caught, fixed, and then the metered path removed entirely. Claude Code now runs in a clean environment without the API key, ensuring it always uses the OAuth session.
 
