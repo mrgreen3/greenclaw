@@ -41,6 +41,14 @@ SHELL_MAX_OUTPUT = 6000  # chars
 NOTES_FILE = os.path.expanduser("~/notes.md")
 CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
 
+# Skills: markdown recipes loaded at boot (front matter only), bodies loaded on demand.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+SKILLS_DIR = os.path.join(_HERE, "skills")
+SKILLS_ALLOW = os.path.join(_HERE, "skills.allow")
+SKILL_BODY_WARN = 6000  # chars; warn if a local skill body is large for Qwen's context
+
+SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
+
 SYSTEM = (
     "You are a terse router agent on Kev's home server (Lenovo M710q, Linux). "
     "Use run_shell to inspect the box and carry out tasks. Use add_note to jot "
@@ -236,10 +244,14 @@ def _ollama_tools():
     return tools
 
 
-def converse_local(text):
-    """Route to local Ollama — free, on-device, no cloud."""
+def converse_local(text, system_extra=None):
+    """Route to local Ollama — free, on-device, no cloud.
+
+    system_extra: optional skill body, appended to SYSTEM for this run only.
+    """
+    system = SYSTEM if not system_extra else f"{SYSTEM}\n\n--- skill ---\n{system_extra}"
     msgs = [
-        {"role": "system", "content": SYSTEM},
+        {"role": "system", "content": system},
         {"role": "user", "content": text},
     ]
     parts = []
@@ -269,10 +281,99 @@ def converse_local(text):
     return "\n".join(parts).strip() or "(no reply)"
 
 
+def parse_front_matter(text):
+    """Split a skill file into (metadata dict, body). Front matter is a --- fenced
+    block of trivial key: value lines at the top. Returns ({}, text) if absent."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+    meta = {}
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            body = "\n".join(lines[i + 1:]).strip()
+            return meta, body
+        if ":" in lines[i]:
+            k, v = lines[i].split(":", 1)
+            meta[k.strip()] = v.strip()
+    return {}, text  # unterminated front matter -> treat as no metadata
+
+
+def load_skills():
+    """Index skills/*.md at boot — front matter only, never the body. Applies the
+    skills.allow lock to locked skills and logs what loaded / was blocked."""
+    SKILLS.clear()
+    if not os.path.isdir(SKILLS_DIR):
+        print("[skills] no skills/ directory — none loaded")
+        return
+    allow = set()
+    if os.path.exists(SKILLS_ALLOW):
+        for line in open(SKILLS_ALLOW):
+            line = line.strip()
+            if line and not line.startswith("#"):
+                allow.add(line)
+    loaded, blocked = [], []
+    for fn in sorted(os.listdir(SKILLS_DIR)):
+        if not fn.endswith(".md"):
+            continue
+        path = os.path.join(SKILLS_DIR, fn)
+        head = open(path).read(4096)  # front matter only; bodies load on demand
+        meta, _ = parse_front_matter(head)
+        name = meta.get("name") or fn[:-3]
+        locked = meta.get("locked", "false").lower() == "true"
+        if locked and name not in allow:
+            blocked.append(name)
+            continue
+        trigger = meta.get("trigger", "")
+        SKILLS[name] = {
+            "name": name,
+            "description": meta.get("description", ""),
+            "exposes": meta.get("exposes", "cc").lower(),
+            "trigger": trigger,
+            "locked": locked,
+            "source": meta.get("source", "unknown"),
+            "path": path,
+        }
+        loaded.append(f"{name}({SKILLS[name]['source']})")
+        if not trigger:
+            print(f"[skills] {name}: no trigger — not reachable until model-selection (v2)")
+    if loaded:
+        print(f"[skills] loaded {len(loaded)}: {', '.join(loaded)}")
+    if blocked:
+        print(f"[skills] blocked {len(blocked)} (locked, not in skills.allow): {', '.join(blocked)}")
+
+
+def match_skill_trigger(text):
+    """Return the skill whose trigger is the first whitespace token of text, else None."""
+    first = text.split(None, 1)[0] if text.split() else ""
+    for skill in SKILLS.values():
+        if skill["trigger"] and skill["trigger"] == first:
+            return skill
+    return None
+
+
+def run_skill(skill, text):
+    """Load the skill body on demand and dispatch to the declared engine."""
+    try:
+        body = parse_front_matter(open(skill["path"]).read())[1]
+    except Exception as e:  # noqa: BLE001
+        return f"[skill error] could not read {skill['path']}: {e}"
+    arg = text[len(skill["trigger"]):].strip() if skill["trigger"] else text
+    if skill["exposes"] == "cc":
+        prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
+        return ask_cc(prompt)
+    # local or both: run on Qwen (which can still delegate_to_cc itself if needed)
+    if len(body) > SKILL_BODY_WARN:
+        print(f"[skills] warning: '{skill['name']}' body is {len(body)} chars — may crowd Qwen's {LOCAL_NUM_CTX}-token context")
+    return converse_local(arg or "Run this skill now.", system_extra=body)
+
+
 def route(text):
     """Shared routing logic for both terminal and Telegram."""
     if text in ("usage", "tokens", "cost"):
         return report_usage()
+    skill = match_skill_trigger(text)
+    if skill:
+        return run_skill(skill, text)
     if text.startswith("gc "):
         return converse_local(text[3:].strip())
     return ask_cc(text)
@@ -372,6 +473,7 @@ def run_telegram():
 
 def main():
     load_env()
+    load_skills()
     if "--telegram" in sys.argv[1:]:
         run_telegram()
     else:
