@@ -1,5 +1,7 @@
 # GreenClaw
 
+> A lightweight AI assistant that runs on old hardware and talks to you via Telegram. No GPU required, no per-token billing, no waste.
+
 <img src="mrclaw-green.svg" width="100"/>
 
 A personal Telegram→AI bridge running on a low-power home server. Send a message, get a capable AI response — no GPU, no cloud subscription beyond what you already have, no waste.
@@ -68,6 +70,15 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 **No metered API path**: GreenClaw has no Anthropic API key dependency. There is no paid-per-token path, no spend guards needed, no surprise bills. If something routes to Claude Code and it fails, it fails cleanly — it doesn't fall back to a billing path.
 
 **The fix that started it**: An early version passed the Anthropic API key to Claude Code subprocesses, causing OAuth-authed Claude Code to fall back to billing API credits. That was caught, fixed, and then the metered path removed entirely. Claude Code now runs in a clean environment without the API key, ensuring it always uses the OAuth session.
+
+---
+
+## This is not for you if...
+
+- You want a polished, point-and-click setup
+- You need it to work on Windows or macOS (Linux only, intentionally)
+- You're looking for a hosted service — this runs on your hardware, your network
+- You want a large capable local model — GreenClaw is built around small, efficient ones
 
 ---
 
@@ -145,6 +156,18 @@ systemctl --user restart greenclaw-bot.service
 ## Hardware
 
 Lenovo M710q Tiny — Intel Core i5, 16GB RAM, 234GB NVMe, running SwayBang Linux (Arch-based). Headless, boots to TTY. Accessible via Tailscale and SSH.
+
+---
+
+## Roadmap
+
+GreenClaw is a few days old and actively being shaped. Things being explored:
+
+- Skills system — drop in `.md` files to add new capabilities
+- System management tasks (updates, cache clearing, health checks)
+- Smarter routing between local and cloud models
+- Hardware tier guide — Pi 4, mini PC, old laptop
+- Easier first-run setup
 
 ---
 
