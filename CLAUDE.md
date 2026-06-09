@@ -1,44 +1,70 @@
 # GreenClaw — Developer Context
 
-GreenClaw is Kev's personal Telegram→AI bridge running on Lenovo M710q (Arch Linux).
-Single file: `greenclaw.py` (~476 lines). Lean, auditable. Do not add unnecessary abstraction.
+GreenClaw is Kev's personal Telegram→AI bridge running on a Lenovo M710q (Arch Linux).
+Single file: `greenclaw.py` (~330 lines). Lean, auditable. Do not add unnecessary abstraction.
 
 ## Architecture
 
 ```
-Telegram message
+Telegram message (or terminal stdin)
     │
-    ├── "gc <query>"             →  converse_local() → Ollama (qwen2.5:3b-instruct, local, no CC)
-    ├── "usage" / "tokens" / "cost"  →  report_usage()
+    ├── "gc <query>"                 →  converse_local() → Ollama (qwen2.5:3b-instruct, local, free)
+    ├── "usage" / "tokens" / "cost"  →  report_usage()   → CC invocation count for today
     │
-    └── anything else            →  ask_cc()         → claude CLI (CC, sonnet, free via Pro sub)
+    └── anything else                →  ask_cc()         → claude CLI (Claude Code, OAuth/Pro)
 ```
 
-Qwen monitors 24/7. CC is invoked per-message as a one-shot subprocess (not persistent).
-No quiet hours. No CC daily call limit.
+`route(text)` is the single dispatch point, shared by both front ends
+(`run_terminal()` and `run_telegram()`). Qwen runs on the box for the free path;
+Claude Code is invoked per-message as a one-shot subprocess (not persistent),
+using the claude.ai Pro OAuth session — there is **no Anthropic API key path**.
+
+No quiet hours. No CC daily call limit. The Telegram front end also runs an
+hourly Gmail check in a background thread (`_mail_check_loop`).
+
+## No metered path — important
+
+This project deliberately has **no `ANTHROPIC_API_KEY` dependency**. `ask_cc()`
+builds a clean subprocess environment with the key stripped out, so Claude Code
+always falls back to the OAuth/Pro session rather than billing API credits. Do
+not reintroduce an API-key path, a spend cap, or a usage/token spend log — those
+were removed on purpose. The only invocation record kept is `cc_calls.jsonl`
+(a count of CC calls, no token data).
 
 ## Key constants (top of greenclaw.py)
 
 | Var | Value | Purpose |
 |-----|-------|---------|
-| `MODEL` | `claude-sonnet-4-6` | Claude Code model (CC path) |
-| `LOCAL_MODEL` | `qwen2.5:3b-instruct` | Ollama model (default free path) |
+| `LOCAL_MODEL` | `qwen2.5:3b-instruct` | Ollama model (the `gc` free path) |
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Local Ollama endpoint |
-| `CC_BIN` | `~/.local/bin/claude` | Claude Code CLI binary |
-| `SPEND_CAP` | set in code | Daily $ cap for Anthropic API spend |
-| `CC_DAILY_LIMIT` | set in code | Max CC calls per day |
+| `LOCAL_NUM_CTX` | `8192` | Ollama context window |
+| `LOCAL_MAX_STEPS` | `8` | Max tool-call loop iterations for the local model |
+| `NOTES_FILE` | `~/notes.md` | Where `add_note`/`list_notes` read and write |
+| `CC_LOG_FILE` | `~/greenclaw/cc_calls.jsonl` | CC invocation log (count only) |
+| `CC_BIN` | `claude` on PATH, else `~/.local/bin/claude` | Claude Code CLI binary |
+
+The Claude Code model (`claude-sonnet-4-6`) is currently passed inline in
+`ask_cc()` via the `--model` flag, not a named constant. If it needs to change
+in more than one place later, promote it to a constant then.
+
+## Tools
+
+`run_shell`, `add_note`, and `list_notes` are defined in the `TOOLS` list and
+dispatched by `dispatch_tool()`. The local model additionally gets
+`delegate_to_cc` (added in `_ollama_tools()`), which lets Qwen hand a task to
+Claude Code for anything needing external access it lacks (Gmail, web, APIs).
 
 ## Adding a feature
 
-**Simple command** — add a branch in `converse()` before the final `else` (Ollama fallback):
+**Simple command** — add a branch in `route()` before the final `ask_cc()` fallthrough:
 ```python
 elif text.startswith("/weather"):
-    location = text[8:].strip() or "London"
-    return get_weather(location)  # implement above converse()
+    location = text[len("/weather"):].strip() or "London"
+    return get_weather(location)  # implement above route()
 ```
 
-**Tool for local model** — add to `_ollama_tools()` and handle in `dispatch_tool()`.
-
+**Tool for the local model** — add the schema to the `TOOLS` list (and, if it's
+local-only, to `_ollama_tools()`), then handle it in `dispatch_tool()`.
 
 ## Running / restarting
 
@@ -46,7 +72,7 @@ elif text.startswith("/weather"):
 # Check running
 systemctl --user status greenclaw-bot.service
 
-# Restart
+# Restart (do this after any code change)
 systemctl --user restart greenclaw-bot.service
 
 # Logs
@@ -57,16 +83,16 @@ journalctl --user -u greenclaw-bot.service -f
 
 | File | Purpose |
 |------|---------|
-| `greenclaw.py` | Everything — single file intentional |
-| `.env` | `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `TELEGRAM_CHAT_ID` |
-| `usage.jsonl` | Anthropic API token spend log |
-| `cc_calls.jsonl` | CC invocation log |
-| `~/notes.md` | Persistent notes written via `add_note` tool |
+| `greenclaw.py` | Everything — single file, intentional |
+| `.env` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (no API key) |
+| `cc_calls.jsonl` | Claude Code invocation log (count only) |
+| `~/notes.md` | Persistent notes written via `add_note` |
 
 ## Rules
 
 - Keep it single-file. No new modules without good reason.
+- No metered/API-key path. OAuth only. (See "No metered path" above.)
 - No features beyond what Kev asks for.
-- Test by restarting and sending a Telegram message.
+- Test by restarting the service and sending a Telegram message.
 - Confirm before anything destructive.
 - Kev values lean and auditable over clever.
