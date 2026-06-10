@@ -1,6 +1,6 @@
 # GreenClaw — Developer Context
 
-GreenClaw is Kev's personal Telegram→AI bridge running on a Lenovo M710q (Arch Linux).
+GreenClaw is a personal Telegram→AI bridge running on a low-power home server (Arch Linux).
 Single file: `greenclaw.py` (~465 lines), plus `skills/*.md`. Lean, auditable. Do not
 add unnecessary abstraction.
 
@@ -86,9 +86,9 @@ in more than one place later, promote it to a constant then.
 
 `run_shell`, `add_note`, and `list_notes` are defined in the `TOOLS` list and
 dispatched by `dispatch_tool()`. The local model additionally gets `delegate_to_cc`
-(added in `_ollama_tools()`), which lets Qwen hand a task to Claude Code for anything
-needing external reach it lacks (Gmail, web, GitHub, APIs). This is the escalation
-path the Qwen-first default relies on.
+(added in `_ollama_tools()`), which lets the local model hand a task to Claude Code
+for anything needing external reach it lacks (Gmail, web, GitHub, APIs). This is the
+escalation path the Qwen-first default relies on.
 
 ## Adding a feature
 
@@ -136,7 +136,7 @@ journalctl --user -u greenclaw-bot.service -f
 - Prefer a skill over code. Only edit `route()` for genuinely new top-level routing.
 - No metered/API-key path. OAuth only. (See "No metered path".)
 - Nothing on a timer. No scheduled/background CC calls. (See "Nothing runs on a timer".)
-- No features beyond what Kev asks for.
+- No features beyond what the user asks for.
 - Test by restarting the service and sending a Telegram message.
 - Confirm before anything destructive.
-- Kev values lean and auditable over clever.
+- Lean and auditable over clever.
