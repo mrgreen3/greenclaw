@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 usage.jsonl
+cc_calls.jsonl
 bot.log
 *.log
 CLAUDE.md

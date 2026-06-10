@@ -13,6 +13,7 @@ Config (in .env):
 """
 
 import os
+import threading
 import time
 
 import httpx
@@ -71,4 +72,11 @@ def start(on_message):
                 print(f"[telegram blocked] chat {chat}: {text!r}")
                 continue
             print(f"[tg {chat}] {text}")
-            on_message(text, lambda reply_text, _chat=chat: send(_chat, reply_text))
+            # Dispatch in a worker thread so the poll loop keeps running. A CC call
+            # can take up to 15 min; blocking here freezes incoming messages and the
+            # offset, so a restart would replay them.
+            threading.Thread(
+                target=on_message,
+                args=(text, lambda reply_text, _chat=chat: send(_chat, reply_text)),
+                daemon=True,
+            ).start()
