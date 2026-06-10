@@ -1,8 +1,8 @@
 ---
-name: help
-description: Show available commands, prefixes, and loaded skills. Use when the user asks what you can do, for a command list, or for help.
+name: cheat
+description: Show available commands, prefixes, and loaded skills. Use when the user asks what you can do, for a command list, or for help. (Named /cheat to avoid Telegram's built-in /help.)
 exposes: local
-trigger: /help
+trigger: /cheat
 locked: false
 source: owner
 ---
