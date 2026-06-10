@@ -208,7 +208,8 @@ def report_usage():
     return f"Claude Code calls today: {get_daily_cc_calls()}"
 
 
-CHEAT_FILE = os.path.join(_HERE, "cheat.md")
+STATIC_DIR = os.path.join(_HERE, "static")
+CHEAT_FILE = os.path.join(STATIC_DIR, "cheat.md")
 
 
 def report_cheat():
