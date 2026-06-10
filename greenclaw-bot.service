@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/greenclaw
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/greenclaw/.venv/bin/python %h/greenclaw/greenclaw.py --tasks
+ExecStart=%h/greenclaw/.venv/bin/python %h/greenclaw/greenclaw.py
 Restart=on-failure
 RestartSec=5
 
