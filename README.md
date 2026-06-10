@@ -14,7 +14,7 @@ Single Python file. Lean, auditable, yours.
 
 GreenClaw sits on a headless Lenovo M710q (Arch Linux, ~10W idle) and listens for Telegram messages via long-poll. Each message is routed to the right AI backend depending on what you need. Results come back to Telegram.
 
-It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone. New capabilities are added as [skills](#skills): markdown recipes you drop in a folder, no code changes.
+It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone. New capabilities are added as [skills](#skills) (markdown recipes you drop in a folder) and new ways to talk to it are added as [tasks](#tasks) (small Python connectors).
 
 ---
 
@@ -28,7 +28,8 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 | `cc <prompt>` | Forces Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
 | `gc <prompt>` | Forces local Ollama (Qwen2.5:3b) | Free — runs on the box |
 | `/<trigger> …` | A skill recipe (see [Skills](#skills)) | Free or subscription, per skill |
-| `usage` / `tokens` / `cost` | CC invocation count | — |
+| `/cheat` | Built-in cheat sheet — prefixes, commands, loaded skills | — |
+| `usage` / `calls` | CC invocation count today | — |
 
 **Default path** (no prefix) goes to the local model first. Qwen handles what it can on the box and delegates to Claude Code itself when a request needs more reach — email, the web, GitHub, or anything multi-step. Claude Code runs headlessly via your claude.ai Pro OAuth session, only when something actually calls for it.
 
@@ -45,15 +46,18 @@ Claude Code has full autonomy: web search, file access, GitHub, email, anything 
 ### Architecture
 
 ```
-Telegram message
+Incoming message (Telegram or other task)
     │
     ├── /<trigger> …    →  matching skill recipe       →  local or CC, per skill
     ├── cc <prompt>     →  Claude Code CLI (OAuth/Pro)  →  forced
     ├── gc <prompt>     →  Ollama (local, Qwen2.5:3b)   →  forced
-    ├── usage           →  CC invocation count
+    ├── /cheat          →  built-in cheat sheet         →  no LLM
+    ├── usage / calls   →  CC invocation count          →  no LLM
     │
     └── anything else   →  Qwen first  →  delegates to Claude Code only when needed
 ```
+
+The core gateway is dispatch-only — it doesn't know or care which connector a message came in on. [Tasks](#tasks) own the connectors (Telegram today, others later); the same routing applies to all.
 
 Runs as a systemd user service. Survives reboots and SSH disconnects.
 
@@ -86,6 +90,27 @@ Send `/health` and the recipe runs. Anything you type after the trigger is passe
 **The lock.** A skill marked `locked: true` won't run unless its name is listed in `skills.allow`. That's the safety catch for anything with reach — destructive commands, anything touching external accounts. The shipped `blog-post` skill is locked by default; uncomment it in `skills.allow` and restart to arm it. To see exactly what the bot can do right now: `cat skills.allow` plus the boot log, which prints what loaded and what was blocked.
 
 **Adding one.** Write `skills/my-thing.md`, restart the service. That's the whole workflow.
+
+---
+
+## Tasks
+
+Skills are recipes for **what to do** with a message. Tasks are connectors for **how messages get in and out** — Telegram, and whatever you add next.
+
+A task is a small Python module in `tasks/` that exposes one function:
+
+```python
+def start(on_message):
+    # loop forever, and for each incoming message call:
+    #   on_message(text, reply)
+    # where reply(text) sends the answer back on the same channel.
+```
+
+Tasks load at boot and each runs in its own daemon thread, so a long Claude Code call on one channel doesn't freeze the others. The core routing (`cc `, `gc `, `/<trigger>`, etc.) is shared between every task.
+
+**Shipped.** `tasks/telegram.py` — long-polls the Telegram Bot API, locks to a single chat ID, dispatches each incoming message in a worker thread so 15-minute CC calls never stall the poll loop.
+
+**Adding one.** Write `tasks/signal.py` (or `discord.py`, or anything else), restart. No flags, no wiring — anything in `tasks/` that has a `start(on_message)` runs.
 
 ---
 
@@ -151,12 +176,10 @@ To find your chat ID: leave `TELEGRAM_CHAT_ID` blank, start the bot, message it 
 ### Run
 
 ```bash
-# Terminal (interactive)
 python greenclaw.py
-
-# Telegram bot
-python greenclaw.py --telegram
 ```
+
+No flags. Tasks in `tasks/` always start. If stdin is a TTY (you ran it interactively) the terminal prompt opens alongside; if not (running under systemd) the process just keeps the tasks alive.
 
 ### Systemd service
 
@@ -187,8 +210,10 @@ systemctl --user restart greenclaw-bot.service
 | `greenclaw.py` | The gateway — single file, intentional |
 | `skills/` | Skill recipes (`*.md`) — add capabilities here, no code |
 | `skills.allow` | Arms `locked` skills — one name per line |
-| `.env` | Secrets — never commit this |
-| `cc_calls.jsonl` | Claude Code invocation log |
+| `tasks/` | Always-on connectors (`*.py`) — Telegram and any others |
+| `static/` | Editable static text — `cheat.md` lives here |
+| `.env` | Secrets (chmod 600) — never commit this |
+| `cc_calls.jsonl` | Claude Code invocation log (gitignored) |
 | `~/notes.md` | Notes written via `add_note` tool |
 
 ---
@@ -209,7 +234,10 @@ GreenClaw is a few days old and actively being shaped. Things being explored:
 - Hardware tier guide — Pi 4, mini PC, old laptop
 - Easier first-run setup
 
-Done so far: the [skills](#skills) system (static gateway, markdown recipes, explicit triggers, lock file).
+Done so far:
+- [Skills](#skills) — static gateway, markdown recipes, explicit triggers, lock file
+- [Tasks](#tasks) — pluggable always-on connectors (Telegram today, room for more)
+- Built-in `/cheat` cheat sheet driven by `static/cheat.md`
 
 ---
 
