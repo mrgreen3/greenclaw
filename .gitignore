@@ -5,3 +5,4 @@ __pycache__/
 usage.jsonl
 bot.log
 *.log
+CLAUDE.md
