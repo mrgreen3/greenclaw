@@ -11,6 +11,7 @@ Per-message channels:
   gc <prompt>            -> force local Ollama (Qwen2.5:3b, free, on-device)
   /<trigger> ...         -> a skill recipe from skills/
   usage / calls          -> CC invocation count today
+  /cheat                 -> built-in cheat sheet (prefixes, commands, skills)
 
 Skills vs tasks:
   skills/*.md   triggered recipes — what to do with a request
@@ -205,6 +206,29 @@ def log_cc_call(prompt_preview):
 
 def report_usage():
     return f"Claude Code calls today: {get_daily_cc_calls()}"
+
+
+CHEAT_FILE = os.path.join(_HERE, "cheat.md")
+
+
+def report_cheat():
+    """Built-in cheat sheet — no LLM. Static text from cheat.md with {skills}
+    placeholder substituted from the live SKILLS dict."""
+    try:
+        with open(CHEAT_FILE) as f:
+            template = f.read()
+    except Exception as e:  # noqa: BLE001
+        return f"[error] could not read cheat.md: {e}"
+    if SKILLS:
+        width = max(len(s["trigger"] or s["name"]) for s in SKILLS.values())
+        rows = []
+        for s in sorted(SKILLS.values(), key=lambda x: x["trigger"] or x["name"]):
+            key = s["trigger"] or f"({s['name']})"
+            rows.append(f"  {key:<{width}}  {s['description']}")
+        skills_block = "\n".join(rows)
+    else:
+        skills_block = "  (none loaded)"
+    return template.replace("{skills}", skills_block).rstrip()
 
 
 CC_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
@@ -412,6 +436,8 @@ def route(text):
     """
     if text in ("usage", "calls"):
         return report_usage()
+    if text in ("/cheat", "cheat"):
+        return report_cheat()
     skill = match_skill_trigger(text)
     if skill:
         return run_skill(skill, text)
