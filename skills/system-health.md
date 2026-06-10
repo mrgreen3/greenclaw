@@ -1,10 +1,10 @@
 ---
 name: system-health
-description: Check disk, memory, load, and the bot service. Use when Kev asks how the box or server is doing.
+description: Check disk, memory, load, and the bot service. Use when the user asks how the box or server is doing.
 exposes: local
 trigger: /health
 locked: false
-source: kev
+source: owner
 ---
 
 Run these and summarise in a few lines, flagging anything that looks off:
