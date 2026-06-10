@@ -3,7 +3,7 @@
 
 Two front ends, one core:
   python greenclaw.py              terminal stdin loop
-  python greenclaw.py --telegram   Telegram bot (long-poll)
+  python greenclaw.py --tasks     run always-on tasks from tasks/ (Telegram etc.)
 
 Per-message channels:
   <prompt>               -> Qwen first (local); it delegates to Claude Code when needed
@@ -12,15 +12,24 @@ Per-message channels:
   /<trigger> ...         -> a skill recipe from skills/
   usage / tokens / cost  -> CC invocation count
 
+Skills vs tasks:
+  skills/*.md   triggered recipes — what to do with a request
+  tasks/*.py    always-on connectors — how messages get in and out.
+                A task implements start(on_message) and calls
+                on_message(text, reply) per incoming message, where
+                reply(text) sends the answer back on the same channel.
+
 LAN / sole-user box. Secrets in .env (TELEGRAM_*).
 Deps: pip install httpx
 """
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -42,6 +51,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(_HERE, "skills")
 SKILLS_ALLOW = os.path.join(_HERE, "skills.allow")
 SKILL_BODY_WARN = 6000  # chars; warn if a local skill body is large for Qwen's context
+
+# Tasks: always-on connectors (Telegram, Signal, ...) loaded from tasks/*.py.
+TASKS_DIR = os.path.join(_HERE, "tasks")
 
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
 
@@ -327,7 +339,7 @@ def run_skill(skill, text):
 
 
 def route(text):
-    """Shared routing logic for both terminal and Telegram.
+    """Shared routing logic for every front end (terminal and all tasks).
 
     Qwen-first: with no prefix, the local model handles it and delegates to Claude
     Code itself when it needs more reach. `cc ` forces Claude Code; `gc ` forces local.
@@ -342,6 +354,67 @@ def route(text):
     if text.startswith("gc "):
         return converse_local(text[3:].strip())
     return converse_local(text)  # default: Qwen first, delegates to CC when needed
+
+
+def load_tasks():
+    """Import every tasks/*.py that defines start(on_message). Tasks own their own
+    config (read from env) and decide for themselves whether to run."""
+    tasks = []
+    if not os.path.isdir(TASKS_DIR):
+        print("[tasks] no tasks/ directory — none loaded")
+        return tasks
+    for fn in sorted(os.listdir(TASKS_DIR)):
+        if not fn.endswith(".py") or fn.startswith("_"):
+            continue
+        path = os.path.join(TASKS_DIR, fn)
+        try:
+            spec = importlib.util.spec_from_file_location(f"greenclaw_tasks.{fn[:-3]}", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:  # noqa: BLE001
+            print(f"[tasks] {fn}: failed to load — {e}")
+            continue
+        if not callable(getattr(mod, "start", None)):
+            print(f"[tasks] {fn}: no start(on_message) — skipped")
+            continue
+        tasks.append(mod)
+    return tasks
+
+
+def run_tasks():
+    """Start every task in its own thread and keep the process alive.
+
+    Each task gets the same on_message: route the text, send the answer back via
+    the task's own reply function. Tasks are isolated — one crashing doesn't take
+    the others down (its thread just ends, logged below).
+    """
+    tasks = load_tasks()
+    if not tasks:
+        sys.exit("[tasks] nothing to run — add a connector to tasks/ (see tasks/telegram.py)")
+
+    def on_message(text, reply):
+        try:
+            reply(route(text))
+        except Exception as e:  # noqa: BLE001
+            print(f"[tasks] on_message error: {e}")
+
+    threads = []
+    for mod in tasks:
+        name = getattr(mod, "NAME", mod.__name__)
+        print(f"[tasks] starting {name}")
+        t = threading.Thread(target=mod.start, args=(on_message,), daemon=True, name=name)
+        t.start()
+        threads.append((name, t))
+
+    try:
+        while True:
+            time.sleep(5)
+            dead = [n for n, t in threads if not t.is_alive()]
+            if len(dead) == len(threads):
+                print(f"[tasks] all tasks have exited ({', '.join(dead)}) — shutting down")
+                return
+    except KeyboardInterrupt:
+        print("\n[tasks] interrupted — bye")
 
 
 def run_terminal():
@@ -359,63 +432,15 @@ def run_terminal():
         print()
 
 
-def run_telegram():
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    if not token:
-        sys.exit("TELEGRAM_BOT_TOKEN not set in .env")
-    allowed = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    api = f"https://api.telegram.org/bot{token}"
-    offset = None
-
-    def send(chat, text):
-        text = text or "(empty)"
-        for i in range(0, len(text), 4000):
-            try:
-                httpx.post(f"{api}/sendMessage",
-                           json={"chat_id": chat, "text": text[i:i + 4000]}, timeout=30)
-            except Exception as e:  # noqa: BLE001
-                print(f"[send error] {e}")
-
-    if allowed:
-        print(f"telegram bot running — locked to chat {allowed}")
-    else:
-        print("telegram bot running — UNLOCKED: reports chat ids only, executes nothing. "
-              "Message it, set TELEGRAM_CHAT_ID in .env, restart.")
-
-    while True:
-        try:
-            r = httpx.get(f"{api}/getUpdates", params={"timeout": 30, "offset": offset}, timeout=40)
-            updates = r.json().get("result", [])
-        except Exception as e:  # noqa: BLE001
-            print(f"[poll error] {e}")
-            time.sleep(5)
-            continue
-
-        for upd in updates:
-            offset = upd["update_id"] + 1
-            msg = upd.get("message") or upd.get("edited_message") or {}
-            text = (msg.get("text") or "").strip()
-            chat = msg.get("chat", {}).get("id")
-            if not text or chat is None:
-                continue
-            if not allowed:
-                send(chat, f"Bot unlocked. Your chat id is {chat}. "
-                           f"Set TELEGRAM_CHAT_ID={chat} in .env and restart to enable.")
-                print(f"[unlocked] chat {chat} said: {text!r}")
-                continue
-            if str(chat) != allowed:
-                send(chat, "unauthorized")
-                print(f"[blocked] chat {chat}: {text!r}")
-                continue
-            print(f"[tg {chat}] {text}")
-            send(chat, route(text))
-
-
 def main():
     load_env()
     load_skills()
-    if "--telegram" in sys.argv[1:]:
-        run_telegram()
+    args = sys.argv[1:]
+    if "--tasks" in args:
+        run_tasks()
+    elif "--telegram" in args:  # deprecated alias, kept so old units keep working
+        print("[deprecated] --telegram is now --tasks (runs everything in tasks/)")
+        run_tasks()
     else:
         run_terminal()
 
