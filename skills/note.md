@@ -1,16 +1,14 @@
 ---
 name: note
-description: Append a timestamped note to ~/notes.md. Use when the user says remember, note, jot, or add to notes.
+description: Append a timestamped note to the user's notes file. Use when the user says remember, note, jot, or add to notes.
 exposes: local
 trigger: /note
 locked: false
 source: owner
 ---
 
-Append the user's text to ~/notes.md using run_shell. Format it as a single line:
-`- [YYYY-MM-DD HH:MM] <text>`
+Call the `add_note` tool with the user's text exactly as given (do not paraphrase
+or edit). Do NOT use run_shell for this — `add_note` writes the file safely and
+handles the timestamp.
 
-Get the timestamp with: `date '+%Y-%m-%d %H:%M'`
-Append with: `echo "- [$(date '+%Y-%m-%d %H:%M')] <text>" >> ~/notes.md`
-
-Confirm what was noted in your reply.
+Confirm what was noted in a one-line reply.

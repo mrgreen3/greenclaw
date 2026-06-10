@@ -10,7 +10,7 @@ Per-message channels:
   cc <prompt>            -> force Claude Code CLI (OAuth/Pro, full autonomy)
   gc <prompt>            -> force local Ollama (Qwen2.5:3b, free, on-device)
   /<trigger> ...         -> a skill recipe from skills/
-  usage / tokens / cost  -> CC invocation count
+  usage / calls          -> CC invocation count today
 
 Skills vs tasks:
   skills/*.md   triggered recipes — what to do with a request
@@ -55,6 +55,8 @@ SKILL_BODY_WARN = 6000  # chars; warn if a local skill body is large for Qwen's 
 # Tasks: always-on connectors (Telegram, Signal, ...) loaded from tasks/*.py.
 TASKS_DIR = os.path.join(_HERE, "tasks")
 
+NOTES_FILE = os.path.expanduser("~/notes.md")
+
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
 
 SYSTEM = (
@@ -83,6 +85,30 @@ TOOLS = [
                 "command": {"type": "string", "description": "The shell command to run."}
             },
             "required": ["command"],
+        },
+    },
+    {
+        "name": "add_note",
+        "description": (
+            "Append a timestamped note to the user's notes file. Use this for any "
+            "'remember', 'note', 'jot' request — never shell out to echo for this."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The note text to append verbatim."}
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "list_notes",
+        "description": "Return the most recent saved notes from the notes file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max number of recent lines to return (default 40).", "default": 40}
+            },
         },
     },
 ]
@@ -123,18 +149,45 @@ def run_shell(command):
         return f"[error] {e}"
 
 
+def add_note(text):
+    text = (text or "").strip()
+    if not text:
+        return "[error] empty note"
+    line = f"- [{datetime.now().strftime('%Y-%m-%d %H:%M')}] {text}\n"
+    try:
+        with open(NOTES_FILE, "a") as f:
+            f.write(line)
+        return f"noted: {text}"
+    except Exception as e:  # noqa: BLE001
+        return f"[error] could not write note: {e}"
+
+
+def list_notes(limit=40):
+    try:
+        with open(NOTES_FILE) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return "(no notes yet)"
+    except Exception as e:  # noqa: BLE001
+        return f"[error] could not read notes: {e}"
+    if not lines:
+        return "(no notes yet)"
+    return "".join(lines[-int(limit):]).rstrip()
+
+
 def get_daily_cc_calls():
     if not os.path.exists(CC_LOG_FILE):
         return 0
     today = datetime.now().strftime("%Y-%m-%d")
     count = 0
-    for line in open(CC_LOG_FILE):
-        try:
-            r = json.loads(line)
-            if r.get("ts", "").startswith(today):
-                count += 1
-        except Exception:  # noqa: BLE001
-            continue
+    with open(CC_LOG_FILE) as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+                if r.get("ts", "").startswith(today):
+                    count += 1
+            except Exception:  # noqa: BLE001
+                continue
     return count
 
 
@@ -151,8 +204,7 @@ def log_cc_call(prompt_preview):
 
 
 def report_usage():
-    cc_today = get_daily_cc_calls()
-    return f"Claude Code invocations today: {cc_today}"
+    return f"Claude Code calls today: {get_daily_cc_calls()}"
 
 
 CC_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
@@ -160,7 +212,7 @@ CC_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 
 def ask_cc(prompt):
     """Hand the whole job to Claude Code headless, full autonomy."""
-    if not (shutil.which("claude") or os.path.exists(CC_BIN)):
+    if not os.path.exists(CC_BIN):
         return "[error] claude CLI not found"
 
     log_cc_call(prompt)
@@ -185,6 +237,10 @@ def ask_cc(prompt):
 def dispatch_tool(name, inp):
     if name == "run_shell":
         return run_shell(inp.get("command", ""))
+    if name == "add_note":
+        return add_note(inp.get("text", ""))
+    if name == "list_notes":
+        return list_notes(inp.get("limit", 40))
     if name == "delegate_to_cc":
         return ask_cc(inp.get("query", ""))
     return f"[error] unknown tool {name}"
@@ -247,7 +303,8 @@ def converse_local(text, system_extra=None):
         for tc in calls:
             fn = tc.get("function", {}).get("name", "")
             args = tc.get("function", {}).get("arguments") or {}
-            print(f"  [g:{fn}] {args.get('command') or args.get('query') or fn}")
+            preview = args.get('command') or args.get('query') or args.get('text') or ''
+            print(f"  [g:{fn}] {preview[:120]}")
             msgs.append({"role": "tool", "content": dispatch_tool(fn, args)})
     return "\n".join(parts).strip() or "(no reply)"
 
@@ -278,16 +335,19 @@ def load_skills():
         return
     allow = set()
     if os.path.exists(SKILLS_ALLOW):
-        for line in open(SKILLS_ALLOW):
-            line = line.strip()
-            if line and not line.startswith("#"):
-                allow.add(line)
+        with open(SKILLS_ALLOW) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    allow.add(line)
     loaded, blocked = [], []
+    triggers_seen = {}  # trigger -> first skill name that claimed it
     for fn in sorted(os.listdir(SKILLS_DIR)):
         if not fn.endswith(".md"):
             continue
         path = os.path.join(SKILLS_DIR, fn)
-        head = open(path).read(4096)  # front matter only; bodies load on demand
+        with open(path) as f:
+            head = f.read(4096)  # front matter only; bodies load on demand
         meta, _ = parse_front_matter(head)
         name = meta.get("name") or fn[:-3]
         locked = meta.get("locked", "false").lower() == "true"
@@ -295,6 +355,11 @@ def load_skills():
             blocked.append(name)
             continue
         trigger = meta.get("trigger", "")
+        if trigger and trigger in triggers_seen:
+            print(f"[skills] WARNING: {name} declares trigger {trigger!r} already used by {triggers_seen[trigger]} — ignoring trigger on {name}")
+            trigger = ""
+        elif trigger:
+            triggers_seen[trigger] = name
         SKILLS[name] = {
             "name": name,
             "description": meta.get("description", ""),
@@ -325,7 +390,8 @@ def match_skill_trigger(text):
 def run_skill(skill, text):
     """Load the skill body on demand and dispatch to the declared engine."""
     try:
-        body = parse_front_matter(open(skill["path"]).read())[1]
+        with open(skill["path"]) as f:
+            body = parse_front_matter(f.read())[1]
     except Exception as e:  # noqa: BLE001
         return f"[skill error] could not read {skill['path']}: {e}"
     arg = text[len(skill["trigger"]):].strip() if skill["trigger"] else text
@@ -344,7 +410,7 @@ def route(text):
     Qwen-first: with no prefix, the local model handles it and delegates to Claude
     Code itself when it needs more reach. `cc ` forces Claude Code; `gc ` forces local.
     """
-    if text in ("usage", "tokens", "cost"):
+    if text in ("usage", "calls"):
         return report_usage()
     skill = match_skill_trigger(text)
     if skill:
@@ -404,11 +470,16 @@ def start_tasks():
 
 
 def keepalive(threads):
-    """Block until all task threads have exited."""
+    """Block until all task threads have exited. Log individual deaths as they happen."""
+    reported_dead = set()
     try:
         while True:
             time.sleep(5)
             dead = [n for n, t in threads if not t.is_alive()]
+            for n in dead:
+                if n not in reported_dead:
+                    print(f"[tasks] {n} thread has died — other tasks continue running")
+                    reported_dead.add(n)
             if len(dead) == len(threads):
                 print(f"[tasks] all tasks have exited ({', '.join(dead)}) — shutting down")
                 return
