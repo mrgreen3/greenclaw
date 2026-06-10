@@ -1,5 +1,5 @@
 [Unit]
-Description=GreenClaw - Telegram Claude bridge
+Description=GreenClaw - always-on tasks (Telegram etc.)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/greenclaw
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/greenclaw/.venv/bin/python %h/greenclaw/greenclaw.py --telegram
+ExecStart=%h/greenclaw/.venv/bin/python %h/greenclaw/greenclaw.py --tasks
 Restart=on-failure
 RestartSec=5
 
