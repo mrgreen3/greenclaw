@@ -68,11 +68,11 @@ A skill is a recipe — instructions the assistant follows — not a plugin or a
 ```markdown
 ---
 name: system-health
-description: Check disk, memory, load, and the bot service. Use when Kev asks how the box is doing.
+description: Check disk, memory, load, and the bot service. Use when the user asks how the box is doing.
 exposes: local          # local (Qwen) | cc (Claude Code) | both
 trigger: /health        # the command that runs it
 locked: false           # true = must be armed in skills.allow before it runs
-source: kev             # who wrote it — for auditing
+source: owner           # who wrote it — for auditing
 ---
 
 Run df -h, free -h and uptime, then summarise in a few lines.
