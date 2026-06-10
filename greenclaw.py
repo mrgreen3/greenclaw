@@ -381,16 +381,11 @@ def load_tasks():
     return tasks
 
 
-def run_tasks():
-    """Start every task in its own thread and keep the process alive.
-
-    Each task gets the same on_message: route the text, send the answer back via
-    the task's own reply function. Tasks are isolated — one crashing doesn't take
-    the others down (its thread just ends, logged below).
-    """
+def start_tasks():
+    """Start all tasks in background threads. Returns list of (name, thread)."""
     tasks = load_tasks()
     if not tasks:
-        sys.exit("[tasks] nothing to run — add a connector to tasks/ (see tasks/telegram.py)")
+        return []
 
     def on_message(text, reply):
         try:
@@ -405,7 +400,11 @@ def run_tasks():
         t = threading.Thread(target=mod.start, args=(on_message,), daemon=True, name=name)
         t.start()
         threads.append((name, t))
+    return threads
 
+
+def keepalive(threads):
+    """Block until all task threads have exited."""
     try:
         while True:
             time.sleep(5)
@@ -435,14 +434,13 @@ def run_terminal():
 def main():
     load_env()
     load_skills()
-    args = sys.argv[1:]
-    if "--tasks" in args:
-        run_tasks()
-    elif "--telegram" in args:  # deprecated alias, kept so old units keep working
-        print("[deprecated] --telegram is now --tasks (runs everything in tasks/)")
-        run_tasks()
+    threads = start_tasks()
+    if sys.stdin.isatty():
+        run_terminal()  # tasks run alongside in their threads
+    elif threads:
+        keepalive(threads)
     else:
-        run_terminal()
+        sys.exit("[tasks] no tasks loaded and no TTY — nothing to do")
 
 
 if __name__ == "__main__":
