@@ -26,7 +26,7 @@ from datetime import datetime
 
 import httpx
 
-# Local model channel: Ollama on the box — free, for the routine run_shell/notes loop.
+# Local model channel: Ollama on the box — free, for the run_shell loop.
 LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "qwen2.5:3b-instruct")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
 LOCAL_NUM_CTX = 8192
@@ -35,7 +35,6 @@ LOCAL_MAX_STEPS = 8
 # Cap run_shell output so a chatty command can't blow the local context or Telegram.
 SHELL_MAX_OUTPUT = 6000  # chars
 
-NOTES_FILE = os.path.expanduser("~/notes.md")
 CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
 
 # Skills: markdown recipes loaded at boot (front matter only), bodies loaded on demand.
@@ -49,8 +48,7 @@ SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; fi
 SYSTEM = (
     "You are the first responder on the user's home server (Linux). "
     "You are a small local model: handle simple things yourself and be honest about your limits. "
-    "Use run_shell to inspect the box or run commands. Use add_note when the user says "
-    "remember/note/jot, and list_notes to read them back. "
+    "Use run_shell to inspect the box or run commands. "
     "Delegate to Claude Code via delegate_to_cc WHENEVER a request needs reach you "
     "don't have — email/Gmail, the web, GitHub, calendar, APIs, or any multi-step or "
     "complex task. In particular, if the user asks about email, their inbox, messages, or "
@@ -74,22 +72,6 @@ TOOLS = [
             },
             "required": ["command"],
         },
-    },
-    {
-        "name": "add_note",
-        "description": "Append a timestamped note to the user's notes file. Use when they say remember/note/jot/add to notes.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "The note text."}
-            },
-            "required": ["text"],
-        },
-    },
-    {
-        "name": "list_notes",
-        "description": "Read back the user's saved notes.",
-        "input_schema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -127,27 +109,6 @@ def run_shell(command):
         return "[error] command timed out (60s)"
     except Exception as e:  # noqa: BLE001
         return f"[error] {e}"
-
-
-def add_note(text):
-    text = (text or "").strip()
-    if not text:
-        return "[error] empty note"
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    with open(NOTES_FILE, "a") as f:
-        f.write(f"- [{ts}] {text}\n")
-    return f"noted: {text}"
-
-
-def list_notes():
-    if not os.path.exists(NOTES_FILE):
-        return "(no notes yet)"
-    lines = open(NOTES_FILE).read().strip().splitlines()
-    if not lines:
-        return "(no notes yet)"
-    tail = lines[-40:]
-    head = "" if len(lines) <= 40 else f"(last 40 of {len(lines)})\n"
-    return head + "\n".join(tail)
 
 
 def get_daily_cc_calls():
@@ -212,10 +173,6 @@ def ask_cc(prompt):
 def dispatch_tool(name, inp):
     if name == "run_shell":
         return run_shell(inp.get("command", ""))
-    if name == "add_note":
-        return add_note(inp.get("text", ""))
-    if name == "list_notes":
-        return list_notes()
     if name == "delegate_to_cc":
         return ask_cc(inp.get("query", ""))
     return f"[error] unknown tool {name}"
@@ -278,7 +235,7 @@ def converse_local(text, system_extra=None):
         for tc in calls:
             fn = tc.get("function", {}).get("name", "")
             args = tc.get("function", {}).get("arguments") or {}
-            print(f"  [g:{fn}] {args.get('command') or args.get('text') or args.get('query') or fn}")
+            print(f"  [g:{fn}] {args.get('command') or args.get('query') or fn}")
             msgs.append({"role": "tool", "content": dispatch_tool(fn, args)})
     return "\n".join(parts).strip() or "(no reply)"
 
