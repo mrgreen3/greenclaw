@@ -230,7 +230,6 @@ Lenovo M710q Tiny — Intel Core i5, 16GB RAM, 234GB NVMe, running SwayBang Linu
 GreenClaw is a few days old and actively being shaped. Things being explored:
 
 - Skills v2 — let the local model pick a skill from a description menu, on top of the explicit triggers that work today
-- System management tasks (updates, cache clearing, health checks)
 - Smarter routing between local and cloud models
 - Hardware tier guide — Pi 4, mini PC, old laptop
 - Easier first-run setup
@@ -241,6 +240,8 @@ Done so far:
 - Built-in `/cheat` cheat sheet driven by `static/cheat.md`
 - Per-chat rolling history — Qwen remembers the last 10 exchanges per conversation; context survives within a session (in-memory; cleared on restart — see [#7](https://github.com/mrgreen3/greenclaw/issues/7))
 - Telegram typing indicator — `typing…` sent before dispatching so the chat feels live during longer calls
+- Runtime-aware system prompt — at startup, `_build_system()` reads `/etc/os-release` and probes installed tools via `which`, so Qwen knows the actual OS and what's available without being told each time
+- System management via natural language — common sysadmin phrases (`update system`, `disk space`, `what's running`) are handled immediately via `run_shell` without asking for clarification; Qwen knows it's on Arch and uses `pacman`, not `apt`
 
 ---
 
