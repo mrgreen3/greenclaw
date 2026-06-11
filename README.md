@@ -14,7 +14,7 @@ Single Python file. Lean, auditable, yours.
 
 GreenClaw sits on a headless Lenovo M710q (Arch Linux, ~10W idle) and listens for Telegram messages via long-poll. Each message is routed to the right AI backend depending on what you need. Results come back to Telegram.
 
-It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone. New capabilities are added as [skills](#skills) (markdown recipes you drop in a folder) and new ways to talk to it are added as [tasks](#tasks) (small Python connectors).
+It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone. It maintains per-chat rolling conversation history, so follow-up messages work naturally without repeating context. New capabilities are added as [skills](#skills) (markdown recipes you drop in a folder) and new ways to talk to it are added as [tasks](#tasks) (small Python connectors).
 
 ---
 
@@ -102,13 +102,14 @@ A task is a small Python module in `tasks/` that exposes one function:
 ```python
 def start(on_message):
     # loop forever, and for each incoming message call:
-    #   on_message(text, reply)
-    # where reply(text) sends the answer back on the same channel.
+    #   on_message(text, reply, chat_id)
+    # where reply(text) sends the answer back on the same channel,
+    # and chat_id is a string identifying the conversation (for history tracking).
 ```
 
 Tasks load at boot and each runs in its own daemon thread, so a long Claude Code call on one channel doesn't freeze the others. The core routing (`cc `, `gc `, `/<trigger>`, etc.) is shared between every task.
 
-**Shipped.** `tasks/telegram.py` — long-polls the Telegram Bot API, locks to a single chat ID, dispatches each incoming message in a worker thread so 15-minute CC calls never stall the poll loop.
+**Shipped.** `tasks/telegram.py` — long-polls the Telegram Bot API, locks to a single chat ID, dispatches each incoming message in a worker thread so 15-minute CC calls never stall the poll loop. Sends a `typing…` indicator before dispatching so the chat feels responsive during longer calls.
 
 **Adding one.** Write `tasks/signal.py` (or `discord.py`, or anything else), restart. No flags, no wiring — anything in `tasks/` that has a `start(on_message)` runs.
 
@@ -238,6 +239,8 @@ Done so far:
 - [Skills](#skills) — static gateway, markdown recipes, explicit triggers, lock file
 - [Tasks](#tasks) — pluggable always-on connectors (Telegram today, room for more)
 - Built-in `/cheat` cheat sheet driven by `static/cheat.md`
+- Per-chat rolling history — Qwen remembers the last 10 exchanges per conversation; context survives within a session (in-memory; cleared on restart — see [#7](https://github.com/mrgreen3/greenclaw/issues/7))
+- Telegram typing indicator — `typing…` sent before dispatching so the chat feels live during longer calls
 
 ---
 
