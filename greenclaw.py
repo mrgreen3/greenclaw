@@ -454,16 +454,17 @@ def route(text, chat_id=None):
     Code itself when it needs more reach. `cc ` forces Claude Code; `gc ` forces local.
     chat_id: passed through to converse_local for per-chat history tracking.
     """
-    if text in ("usage", "calls"):
+    text_lower = text.lower()
+    if text_lower in ("usage", "calls"):
         return report_usage()
-    if text in ("/cheat", "cheat"):
+    if text_lower in ("/cheat", "cheat"):
         return report_cheat()
-    skill = match_skill_trigger(text)
+    skill = match_skill_trigger(text_lower)
     if skill:
         return run_skill(skill, text)
-    if text.startswith("cc "):
+    if text_lower.startswith("cc "):
         return ask_cc(text[3:].strip())
-    if text.startswith("gc "):
+    if text_lower.startswith("gc "):
         return converse_local(text[3:].strip(), chat_id=chat_id)
     return converse_local(text, chat_id=chat_id)  # default: Qwen first
 
