@@ -250,7 +250,7 @@ def ask_cc(prompt):
     try:
         cc_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         p = subprocess.run(
-            [CC_BIN, "-p", prompt, "--model", "claude-sonnet-4-6", "--dangerously-skip-permissions"],
+            [CC_BIN, "-p", prompt, "--model", "claude-haiku-4-5-20251001", "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=900, env=cc_env,
         )
         out = (p.stdout or "").strip()
