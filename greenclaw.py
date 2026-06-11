@@ -97,7 +97,16 @@ def _build_system():
         f"Confirmed tools on this machine: {tools}. "
         "Do not assume a tool is missing — verify with run_shell first. "
         "Never refuse a task without attempting it. If a command fails, report the actual error. "
-        "The user is the sole owner of this machine — no need to ask for sudo confirmation."
+        "The user is the sole owner of this machine — no need to ask for sudo confirmation. "
+        "For common sysadmin phrases, act immediately without asking for clarification. Examples:\n"
+        "  'update system' or 'update' -> run: sudo pacman -Syu --noconfirm\n"
+        "  'disk space' or 'storage' -> run: df -h\n"
+        "  'memory' or 'ram' -> run: free -h\n"
+        "  'what's running' or 'processes' -> run: ps aux or systemctl list-units --state=running\n"
+        "  'uptime' -> run: uptime\n"
+        "  'logs' -> run: journalctl -n 50 --no-pager\n"
+        "  'reboot' or 'restart' -> run: sudo reboot (confirm first)\n"
+        "If a request is ambiguous but has an obvious sysadmin interpretation, use it."
     )
 
 
