@@ -17,7 +17,7 @@ Skills vs tasks:
   skills/*.md   triggered recipes — what to do with a request
   tasks/*.py    always-on connectors — how messages get in and out.
                 A task implements start(on_message) and calls
-                on_message(text, reply) per incoming message, where
+                on_message(text, reply, chat_id) per incoming message, where
                 reply(text) sends the answer back on the same channel.
 
 LAN / sole-user box. Secrets in .env (TELEGRAM_*).
@@ -59,6 +59,11 @@ TASKS_DIR = os.path.join(_HERE, "tasks")
 NOTES_FILE = os.path.expanduser("~/notes.md")
 
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
+
+# Per-chat rolling history for converse_local. In-memory only; cleared on restart.
+# Keys are chat_id strings; values are lists of {role, content} dicts.
+_history: dict = {}
+HISTORY_MAX_TURNS = 10  # pairs (user + assistant); older turns are dropped
 
 SYSTEM = (
     "You are the first responder on the user's home server (Linux). "
@@ -296,16 +301,20 @@ def _ollama_tools():
     return tools
 
 
-def converse_local(text, system_extra=None):
+def converse_local(text, system_extra=None, chat_id=None):
     """Route to local Ollama — free, on-device, no cloud.
 
     system_extra: optional skill body, appended to SYSTEM for this run only.
+    chat_id: if provided, rolling history is loaded before the call and saved
+             after. None (terminal mode) means no history accumulates.
     """
     system = SYSTEM if not system_extra else f"{SYSTEM}\n\n--- skill ---\n{system_extra}"
-    msgs = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": text},
-    ]
+    history = _history.get(str(chat_id), []) if chat_id is not None else []
+    msgs = (
+        [{"role": "system", "content": system}]
+        + history
+        + [{"role": "user", "content": text}]
+    )
     parts = []
     for _ in range(LOCAL_MAX_STEPS):
         try:
@@ -331,7 +340,16 @@ def converse_local(text, system_extra=None):
             preview = args.get('command') or args.get('query') or args.get('text') or ''
             print(f"  [g:{fn}] {preview[:120]}")
             msgs.append({"role": "tool", "content": dispatch_tool(fn, args)})
-    return "\n".join(parts).strip() or "(no reply)"
+    reply = "\n".join(parts).strip() or "(no reply)"
+    # Save history: append this user/assistant pair and trim to the rolling window.
+    if chat_id is not None:
+        key = str(chat_id)
+        updated = _history.get(key, []) + [
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": reply},
+        ]
+        _history[key] = updated[-(HISTORY_MAX_TURNS * 2):]
+    return reply
 
 
 def parse_front_matter(text):
@@ -429,11 +447,12 @@ def run_skill(skill, text):
     return converse_local(arg or "Run this skill now.", system_extra=body)
 
 
-def route(text):
+def route(text, chat_id=None):
     """Shared routing logic for every front end (terminal and all tasks).
 
     Qwen-first: with no prefix, the local model handles it and delegates to Claude
     Code itself when it needs more reach. `cc ` forces Claude Code; `gc ` forces local.
+    chat_id: passed through to converse_local for per-chat history tracking.
     """
     if text in ("usage", "calls"):
         return report_usage()
@@ -445,8 +464,8 @@ def route(text):
     if text.startswith("cc "):
         return ask_cc(text[3:].strip())
     if text.startswith("gc "):
-        return converse_local(text[3:].strip())
-    return converse_local(text)  # default: Qwen first, delegates to CC when needed
+        return converse_local(text[3:].strip(), chat_id=chat_id)
+    return converse_local(text, chat_id=chat_id)  # default: Qwen first
 
 
 def load_tasks():
@@ -480,9 +499,9 @@ def start_tasks():
     if not tasks:
         return []
 
-    def on_message(text, reply):
+    def on_message(text, reply, chat_id=None):
         try:
-            reply(route(text))
+            reply(route(text, chat_id=chat_id))
         except Exception as e:  # noqa: BLE001
             print(f"[tasks] on_message error: {e}")
 

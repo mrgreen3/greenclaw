@@ -3,9 +3,9 @@
 A task is an always-on connector: it owns one interface (here, Telegram) and
 speaks one tiny protocol with the core:
 
-    start(on_message)              called once, in a dedicated thread; loop forever
-    on_message(text, reply)        call this per incoming message;
-                                   reply(text) sends the answer back
+    start(on_message)                    called once, in a dedicated thread; loop forever
+    on_message(text, reply, chat_id)     call this per incoming message;
+                                         reply(text) sends the answer back
 
 Config (in .env):
     TELEGRAM_BOT_TOKEN    bot token from @BotFather
@@ -77,6 +77,6 @@ def start(on_message):
             # offset, so a restart would replay them.
             threading.Thread(
                 target=on_message,
-                args=(text, lambda reply_text, _chat=chat: send(_chat, reply_text)),
+                args=(text, lambda reply_text, _chat=chat: send(_chat, reply_text), str(chat)),
                 daemon=True,
             ).start()
