@@ -65,18 +65,43 @@ SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; fi
 _history: dict = {}
 HISTORY_MAX_TURNS = 10  # pairs (user + assistant); older turns are dropped
 
-SYSTEM = (
-    "You are the first responder on the user's home server (Linux). "
-    "You are a small local model: handle simple things yourself and be honest about your limits. "
-    "Use run_shell to inspect the box or run commands. "
-    "Delegate to Claude Code via delegate_to_cc WHENEVER a request needs reach you "
-    "don't have — email/Gmail, the web, GitHub, calendar, APIs, or any multi-step or "
-    "complex task. In particular, if the user asks about email, their inbox, messages, or "
-    "whether someone has written, replied or been in touch, call delegate_to_cc. "
-    "When you delegate, pass a complete, specific instruction that includes the user's "
-    "original request. Never invent things you can't actually access — delegate instead. "
-    "Be concise — lead with the answer. Confirm before anything destructive."
-)
+
+def _build_system():
+    """Build the Qwen system prompt from real runtime facts gathered once at startup."""
+    try:
+        raw = subprocess.check_output(
+            "grep PRETTY_NAME /etc/os-release", shell=True, text=True
+        ).strip()
+        os_name = raw.split("=", 1)[-1].strip('"')
+    except Exception:
+        os_name = "Linux"
+    try:
+        probe = subprocess.check_output(
+            "which pacman yay systemctl journalctl git python ollama claude 2>/dev/null",
+            shell=True, text=True,
+        ).strip()
+        tools = ", ".join(os.path.basename(t) for t in probe.splitlines() if t)
+    except Exception:
+        tools = "standard Linux tools"
+    return (
+        f"You are the first responder on the user's home server ({os_name}). "
+        "You are a small local model: handle simple things yourself and be honest about your limits. "
+        "Use run_shell to inspect the box or run commands. "
+        "Delegate to Claude Code via delegate_to_cc WHENEVER a request needs reach you "
+        "don't have — email/Gmail, the web, GitHub, calendar, APIs, or any multi-step or "
+        "complex task. In particular, if the user asks about email, their inbox, messages, or "
+        "whether someone has written, replied or been in touch, call delegate_to_cc. "
+        "When you delegate, pass a complete, specific instruction that includes the user's "
+        "original request. Never invent things you can't actually access — delegate instead. "
+        "Be concise — lead with the answer. Confirm before anything destructive. "
+        f"Confirmed tools on this machine: {tools}. "
+        "Do not assume a tool is missing — verify with run_shell first. "
+        "Never refuse a task without attempting it. If a command fails, report the actual error. "
+        "The user is the sole owner of this machine — no need to ask for sudo confirmation."
+    )
+
+
+SYSTEM = _build_system()
 
 TOOLS = [
     {
