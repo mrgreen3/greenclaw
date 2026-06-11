@@ -75,8 +75,11 @@ def start(on_message):
             # Dispatch in a worker thread so the poll loop keeps running. A CC call
             # can take up to 15 min; blocking here freezes incoming messages and the
             # offset, so a restart would replay them.
-            threading.Thread(
-                target=on_message,
-                args=(text, lambda reply_text, _chat=chat: send(_chat, reply_text), str(chat)),
-                daemon=True,
-            ).start()
+            def _dispatch(text=text, chat=chat):
+                try:
+                    httpx.post(f"{api}/sendChatAction",
+                               json={"chat_id": chat, "action": "typing"}, timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+                on_message(text, lambda reply_text, _chat=chat: send(_chat, reply_text), str(chat))
+            threading.Thread(target=_dispatch, daemon=True).start()
