@@ -66,19 +66,6 @@ _history: dict = {}
 HISTORY_MAX_TURNS = 10  # pairs (user + assistant); older turns are dropped
 
 
-def resolve_templates(text):
-    """Substitute {{datetime}} and {{date}} placeholders with live values.
-
-    Called at message time (not boot) so the values are always current.
-      {{datetime}}  ->  Thursday 11 June 2026, 14:32
-      {{date}}      ->  Thursday 11 June 2026
-    """
-    now = datetime.now()
-    text = text.replace("{{datetime}}", now.strftime("%A %d %B %Y, %H:%M"))
-    text = text.replace("{{date}}", now.strftime("%A %d %B %Y"))
-    return text
-
-
 def _build_system():
     """Build the Qwen system prompt from real runtime facts gathered once at startup."""
     try:
@@ -119,8 +106,7 @@ def _build_system():
         "  'uptime' -> run: uptime\n"
         "  'logs' -> run: journalctl -n 50 --no-pager\n"
         "  'reboot' or 'restart' -> run: sudo reboot (confirm first)\n"
-        "If a request is ambiguous but has an obvious sysadmin interpretation, use it.\n"
-        "Current date and time: {{datetime}}"
+        "If a request is ambiguous but has an obvious sysadmin interpretation, use it."
     )
 
 
@@ -356,9 +342,7 @@ def converse_local(text, system_extra=None, chat_id=None):
     chat_id: if provided, rolling history is loaded before the call and saved
              after. None (terminal mode) means no history accumulates.
     """
-    # Resolve templates at message time so {{datetime}} is always current.
-    live_system = resolve_templates(SYSTEM)
-    system = live_system if not system_extra else f"{live_system}\n\n--- skill ---\n{system_extra}"
+    system = SYSTEM if not system_extra else f"{SYSTEM}\n\n--- skill ---\n{system_extra}"
     history = _history.get(str(chat_id), []) if chat_id is not None else []
     msgs = (
         [{"role": "system", "content": system}]
@@ -481,13 +465,12 @@ def match_skill_trigger(text):
 
 
 def run_skill(skill, text):
-    """Load the skill body on demand, resolve templates, and dispatch to the declared engine."""
+    """Load the skill body on demand and dispatch to the declared engine."""
     try:
         with open(skill["path"]) as f:
             body = parse_front_matter(f.read())[1]
     except Exception as e:  # noqa: BLE001
         return f"[skill error] could not read {skill['path']}: {e}"
-    body = resolve_templates(body)
     arg = text[len(skill["trigger"]):].strip() if skill["trigger"] else text
     if skill["exposes"] == "cc":
         prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
@@ -612,5 +595,5 @@ def main():
         sys.exit("[tasks] no tasks loaded and no TTY — nothing to do")
 
 
-if __name__ == "__name__":
+if __name__ == "__main__":
     main()
