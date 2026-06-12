@@ -11,6 +11,7 @@ Per-message channels:
   gc <prompt>            -> force local Ollama (Qwen2.5:3b, free, on-device)
   /<trigger> ...         -> a skill recipe from skills/
   usage / calls          -> CC invocation count today
+  /version               -> show greenclaw version
   /cheat                 -> built-in cheat sheet (prefixes, commands, skills)
 
 Skills vs tasks:
@@ -23,6 +24,8 @@ Skills vs tasks:
 LAN / sole-user box. Secrets in .env (TELEGRAM_*).
 Deps: pip install httpx
 """
+
+__version__ = "0.3.0"
 
 import importlib.util
 import json
@@ -245,6 +248,10 @@ def log_cc_call(prompt_preview):
 
 def report_usage():
     return f"Claude Code calls today: {get_daily_cc_calls()}"
+
+
+def report_version():
+    return f"greenclaw {__version__}"
 
 
 STATIC_DIR = os.path.join(_HERE, "static")
@@ -491,6 +498,8 @@ def route(text, chat_id=None):
     text_lower = text.lower()
     if text_lower in ("usage", "calls"):
         return report_usage()
+    if text_lower in ("/version", "version"):
+        return report_version()
     if text_lower in ("/cheat", "cheat"):
         return report_cheat()
     skill = match_skill_trigger(text_lower)
