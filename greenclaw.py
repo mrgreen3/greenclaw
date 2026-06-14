@@ -340,6 +340,8 @@ def ask_cc(prompt):
     if not os.path.exists(CC_BIN):
         return "[error] claude CLI not found"
 
+    now = datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
+    prompt = f"[Current date/time: {now} GMT+1]\n\n{prompt}"
     log_cc_call(prompt)
     print("  [-> Claude Code]")
     try:
