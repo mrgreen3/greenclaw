@@ -760,7 +760,7 @@ def route(text, chat_id=None):
         return report_schedule()
     if text_lower == "/regreen":
         threading.Timer(1.5, lambda: subprocess.run(
-            ["systemctl", "--user", "restart", "greenclaw-bot.service"]
+            ["systemctl", "--user", "restart", "greenclaw.service"]
         )).start()
         return "restarting…"
     skill = match_skill_trigger(text_lower)

@@ -186,20 +186,20 @@ No flags. Tasks in `tasks/` always start. If stdin is a TTY (you ran it interact
 
 ```bash
 # Install the service file
-cp greenclaw-bot.service ~/.config/systemd/user/
+cp greenclaw.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 
 # Enable and start
-systemctl --user enable --now greenclaw-bot.service
+systemctl --user enable --now greenclaw.service
 
 # Survive logout
 loginctl enable-linger $USER
 
 # Logs
-journalctl --user -u greenclaw-bot.service -f
+journalctl --user -u greenclaw.service -f
 
 # Restart after changes
-systemctl --user restart greenclaw-bot.service
+systemctl --user restart greenclaw.service
 ```
 
 ---

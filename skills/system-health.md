@@ -12,7 +12,7 @@ Run these and summarise in a few lines, flagging anything that looks off:
 - `df -h /mnt/storage 2>/dev/null || df -h /data 2>/dev/null || lsblk -o MOUNTPOINT,SIZE,USED,AVAIL | grep -v "^$\|loop"`  storage drive
 - `free -h`                        memory
 - `uptime`                         load average
-- `systemctl --user is-active greenclaw-bot.service`   is the bot up
+- `systemctl --user is-active greenclaw.service`   is the bot up
 - `sensors 2>/dev/null | grep -i 'temp\|core' | head -5`  temperatures (skip if sensors not installed)
 
 Keep it terse. Flag anything that looks off. Don't suggest fixes unless something is actually wrong.
