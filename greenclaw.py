@@ -63,10 +63,54 @@ NOTES_FILE = os.path.expanduser("~/notes.md")
 
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
 
-# Per-chat rolling history for converse_local. In-memory only; cleared on restart.
+# Per-chat rolling history for converse_local. Persisted to disk across restarts.
 # Keys are chat_id strings; values are lists of {role, content} dicts.
 _history: dict = {}
+_history_updated: dict = {}  # key -> float; per-chat last-active timestamp
+_history_lock = threading.Lock()
 HISTORY_MAX_TURNS = 10  # pairs (user + assistant); older turns are dropped
+HISTORY_FILE = os.path.expanduser("~/.local/share/greenclaw/history.json")
+HISTORY_TTL_DAYS = 7  # discard entries older than this on load
+
+
+def load_history():
+    global _history, _history_updated
+    if not os.path.exists(HISTORY_FILE):
+        return
+    try:
+        with open(HISTORY_FILE) as f:
+            data = json.load(f)
+        cutoff = time.time() - HISTORY_TTL_DAYS * 86400
+        with _history_lock:
+            _history = {
+                k: v["messages"]
+                for k, v in data.items()
+                if v.get("updated", 0) >= cutoff
+            }
+            _history_updated = {
+                k: v.get("updated", 0)
+                for k, v in data.items()
+                if v.get("updated", 0) >= cutoff
+            }
+        print(f"[history] loaded {len(_history)} chat(s) from disk")
+    except Exception as e:
+        print(f"[history] failed to load: {e}")
+
+
+def save_history(key):
+    os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    with _history_lock:
+        data = {
+            k: {"messages": v, "updated": _history_updated.get(k, 0)}
+            for k, v in _history.items()
+        }
+    tmp = HISTORY_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, HISTORY_FILE)
+    except Exception as e:
+        print(f"[history] failed to save: {e}")
 
 
 def _build_system():
@@ -215,7 +259,11 @@ def list_notes(limit=40):
         return f"[error] could not read notes: {e}"
     if not lines:
         return "(no notes yet)"
-    return "".join(lines[-int(limit):]).rstrip()
+    try:
+        n = max(1, int(limit))
+    except (TypeError, ValueError):
+        n = 40
+    return "".join(lines[-n:]).rstrip()
 
 
 def get_daily_cc_calls():
@@ -350,7 +398,8 @@ def converse_local(text, system_extra=None, chat_id=None):
              after. None (terminal mode) means no history accumulates.
     """
     system = SYSTEM if not system_extra else f"{SYSTEM}\n\n--- skill ---\n{system_extra}"
-    history = _history.get(str(chat_id), []) if chat_id is not None else []
+    with _history_lock:
+        history = list(_history.get(str(chat_id), [])) if chat_id is not None else []
     msgs = (
         [{"role": "system", "content": system}]
         + history
@@ -380,16 +429,20 @@ def converse_local(text, system_extra=None, chat_id=None):
             args = tc.get("function", {}).get("arguments") or {}
             preview = args.get('command') or args.get('query') or args.get('text') or ''
             print(f"  [g:{fn}] {preview[:120]}")
-            msgs.append({"role": "tool", "content": dispatch_tool(fn, args)})
+            msgs.append({"role": "tool", "content": dispatch_tool(fn, args), "name": fn})
     reply = "\n".join(parts).strip() or "(no reply)"
     # Save history: append this user/assistant pair and trim to the rolling window.
     if chat_id is not None:
         key = str(chat_id)
-        updated = _history.get(key, []) + [
-            {"role": "user", "content": text},
-            {"role": "assistant", "content": reply},
-        ]
-        _history[key] = updated[-(HISTORY_MAX_TURNS * 2):]
+        with _history_lock:
+            existing = _history.get(key, [])
+            merged = existing + [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": reply},
+            ]
+            _history[key] = merged[-(HISTORY_MAX_TURNS * 2):]
+            _history_updated[key] = time.time()
+        save_history(key)
     return reply
 
 
@@ -431,7 +484,7 @@ def load_skills():
             continue
         path = os.path.join(SKILLS_DIR, fn)
         with open(path) as f:
-            head = f.read(4096)  # front matter only; bodies load on demand
+            head = f.read()  # body is discarded here; loaded on demand by run_skill
         meta, _ = parse_front_matter(head)
         name = meta.get("name") or fn[:-3]
         locked = meta.get("locked", "false").lower() == "true"
@@ -466,7 +519,7 @@ def match_skill_trigger(text):
     """Return the skill whose trigger is the first whitespace token of text, else None."""
     first = text.split(None, 1)[0] if text.split() else ""
     for skill in SKILLS.values():
-        if skill["trigger"] and skill["trigger"] == first:
+        if skill["trigger"] and skill["trigger"].lower() == first:
             return skill
     return None
 
@@ -594,6 +647,7 @@ def run_terminal():
 
 def main():
     load_env()
+    load_history()
     load_skills()
     threads = start_tasks()
     if sys.stdin.isatty():
