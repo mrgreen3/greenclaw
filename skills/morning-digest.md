@@ -7,7 +7,7 @@ locked: false
 source: owner
 ---
 
-Produce a morning digest for Kev. Two sections, keep it terse:
+Produce a morning digest for Kev. Use UK date format (e.g. 14 June 2026). Two sections, keep it terse:
 
 **Mail**
 Check Gmail for anything received since yesterday. One line each: sender — subject — the gist. Skip newsletters and automated notifications unless they're urgent. If nothing notable, say so. Read-only — do not reply, archive, label, or delete anything.
