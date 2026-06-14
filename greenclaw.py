@@ -10,22 +10,24 @@ Per-message channels:
   cc <prompt>            -> force Claude Code CLI (OAuth/Pro, full autonomy)
   gc <prompt>            -> force local Ollama (Qwen2.5:3b, free, on-device)
   /<trigger> ...         -> a skill recipe from skills/
+  /watch                 -> show scheduled jobs and when they last ran
   usage / calls          -> CC invocation count today
   /version               -> show greenclaw version
   /cheat                 -> built-in cheat sheet (prefixes, commands, skills)
 
-Skills vs tasks:
-  skills/*.md   triggered recipes — what to do with a request
-  tasks/*.py    always-on connectors — how messages get in and out.
-                A task implements start(on_message) and calls
-                on_message(text, reply, chat_id) per incoming message, where
-                reply(text) sends the answer back on the same channel.
+Skills vs tasks vs schedules:
+  skills/*.md     triggered recipes — what to do with a request
+  schedules/*.md  timed jobs — when to run a skill automatically
+  tasks/*.py      always-on connectors — how messages get in and out.
+                  A task implements start(on_message) and calls
+                  on_message(text, reply, chat_id) per incoming message, where
+                  reply(text) sends the answer back on the same channel.
 
 LAN / sole-user box. Secrets in .env (TELEGRAM_*).
 Deps: pip install httpx
 """
 
-__version__ = "0.3.4"
+__version__ = "0.4.0"
 
 import importlib.util
 import json
@@ -58,6 +60,10 @@ SKILL_BODY_WARN = 6000  # chars; warn if a local skill body is large for Qwen's 
 
 # Tasks: always-on connectors (Telegram, Signal, ...) loaded from tasks/*.py.
 TASKS_DIR = os.path.join(_HERE, "tasks")
+
+# Schedules: timed jobs loaded from schedules/*.md.
+SCHEDULES_DIR = os.path.join(_HERE, "schedules")
+SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json")
 
 NOTES_FILE = os.path.expanduser("~/notes.md")
 
@@ -515,6 +521,199 @@ def load_skills():
         print(f"[skills] blocked {len(blocked)} (locked, not in skills.allow): {', '.join(blocked)}")
 
 
+# ---------------------------------------------------------------------------
+# SCHEDULER — schedules/*.md define timed jobs; this section owns the watch.
+# ---------------------------------------------------------------------------
+
+def load_schedules():
+    """Parse schedules/*.md — front matter only.
+
+    Front matter fields:
+        name      unique id (defaults to filename stem)
+        schedule  HH:MM  (24-hour)
+        days      mon,tue,wed,thu,fri,sat,sun  or  mon-fri  or  daily (default)
+        skill     skill name to invoke (must exist in SKILLS)
+        note      optional extra instruction appended to the skill body
+    """
+    if not os.path.isdir(SCHEDULES_DIR):
+        return []
+    scheds = []
+    for fn in sorted(os.listdir(SCHEDULES_DIR)):
+        if not fn.endswith(".md"):
+            continue
+        path = os.path.join(SCHEDULES_DIR, fn)
+        with open(path) as f:
+            text = f.read()
+        meta, body = parse_front_matter(text)
+        name = meta.get("name") or fn[:-3]
+        schedule = meta.get("schedule", "").strip()
+        if not schedule:
+            print(f"[scheduler] {fn}: no schedule field — skipped")
+            continue
+        try:
+            hour, minute = [int(x) for x in schedule.split(":")]
+        except ValueError:
+            print(f"[scheduler] {fn}: bad schedule {schedule!r} — skipped")
+            continue
+        days_raw = meta.get("days", "daily").strip().lower()
+        days = _parse_days(days_raw)
+        skill_name = meta.get("skill", "").strip()
+        note = meta.get("note", "").strip() or body.strip()
+        scheds.append({
+            "name": name,
+            "hour": hour,
+            "minute": minute,
+            "days": days,
+            "skill": skill_name,
+            "note": note,
+            "path": path,
+        })
+        print(f"[scheduler] loaded: {name} @ {hour:02d}:{minute:02d} days={days_raw} skill={skill_name or '—'}")
+    return scheds
+
+
+def _parse_days(raw):
+    """Return a set of weekday ints (0=Mon … 6=Sun) from a days string."""
+    names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    if raw in ("daily", "*", ""):
+        return set(range(7))
+    # range like mon-fri
+    if "-" in raw and "," not in raw:
+        parts = raw.split("-")
+        if len(parts) == 2 and parts[0] in names and parts[1] in names:
+            start, end = names.index(parts[0]), names.index(parts[1])
+            return set(range(start, end + 1))
+    # comma list like mon,wed,fri
+    result = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if token in names:
+            result.add(names.index(token))
+    return result or set(range(7))
+
+
+def _load_schedule_state():
+    """Return dict of name -> last_fired ISO string."""
+    if not os.path.exists(SCHEDULE_STATE_FILE):
+        return {}
+    try:
+        with open(SCHEDULE_STATE_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[scheduler] could not load state: {e}")
+        return {}
+
+
+def _save_schedule_state(state):
+    os.makedirs(os.path.dirname(SCHEDULE_STATE_FILE), exist_ok=True)
+    tmp = SCHEDULE_STATE_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, SCHEDULE_STATE_FILE)
+    except Exception as e:
+        print(f"[scheduler] could not save state: {e}")
+
+
+def _schedule_due(sched, now, state):
+    """True if this schedule should fire right now."""
+    if now.weekday() not in sched["days"]:
+        return False
+    if now.hour != sched["hour"] or now.minute != sched["minute"]:
+        return False
+    last = state.get(sched["name"])
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last)
+            # Already fired within the last 30 minutes — don't repeat.
+            if (now - last_dt).total_seconds() < 1800:
+                return False
+        except ValueError:
+            pass
+    return True
+
+
+def report_schedule():
+    """/watch command — show what's scheduled and when each last ran."""
+    scheds = load_schedules()
+    if not scheds:
+        return "No schedules loaded."
+    state = _load_schedule_state()
+    day_names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    lines = ["🕐 Greenclaw's watch\n"]
+    for s in scheds:
+        days = s.get("days", set(range(7)))
+        if days == set(range(7)):
+            day_str = "daily"
+        elif days == set(range(5)):
+            day_str = "mon-fri"
+        else:
+            day_str = ",".join(day_names[d] for d in sorted(days))
+        last = state.get(s["name"], "never")
+        skill_str = f" → {s['skill']}" if s["skill"] else ""
+        lines.append(
+            f"  {s['name']}{skill_str}\n"
+            f"    {s['hour']:02d}:{s['minute']:02d} {day_str}  |  last ran: {last}"
+        )
+    return "\n".join(lines)
+
+
+def _run_schedule(sched):
+    """Invoke a schedule: run its named skill (with optional note), or route the note directly."""
+    skill_name = sched.get("skill")
+    note = sched.get("note", "")
+    if skill_name:
+        skill = SKILLS.get(skill_name)
+        if not skill:
+            return f"[scheduler] skill '{skill_name}' not found in loaded skills"
+        if note:
+            with open(skill["path"]) as f:
+                original = f.read()
+            _, body = parse_front_matter(original)
+            augmented_body = f"{body}\n\nAdditional instruction: {note}"
+            return converse_local("Run this skill now.", system_extra=augmented_body)
+        return run_skill(skill, "")
+    elif note:
+        return route(note)
+    return "[scheduler] nothing to run — no skill or note in schedule"
+
+
+def start_scheduler(reply_fn):
+    """Start the scheduler thread. reply_fn(text) sends output to the user."""
+    scheds = load_schedules()
+    if not scheds:
+        print("[scheduler] no schedules found — not started")
+        return
+
+    def loop():
+        state = _load_schedule_state()
+        while True:
+            now = datetime.now().replace(second=0, microsecond=0)
+            for sched in scheds:
+                if not _schedule_due(sched, now, state):
+                    continue
+                print(f"[scheduler] firing: {sched['name']}")
+                try:
+                    result = _run_schedule(sched)
+                except Exception as e:  # noqa: BLE001
+                    result = f"[scheduler error] {sched['name']}: {e}"
+                state[sched["name"]] = now.isoformat()
+                _save_schedule_state(state)
+                reply_fn(f"⏰ {sched['name']}\n\n{result}")
+            # Sleep until the next whole minute.
+            sleep_secs = 60 - datetime.now().second
+            time.sleep(max(sleep_secs, 1))
+
+    t = threading.Thread(target=loop, daemon=True, name="scheduler")
+    t.start()
+    print("[scheduler] started")
+
+
+# ---------------------------------------------------------------------------
+# END SCHEDULER
+# ---------------------------------------------------------------------------
+
+
 def match_skill_trigger(text):
     """Return the skill whose trigger is the first whitespace token of text, else None."""
     first = text.split(None, 1)[0] if text.split() else ""
@@ -555,6 +754,8 @@ def route(text, chat_id=None):
         return report_version()
     if text_lower in ("/cheat", "cheat"):
         return report_cheat()
+    if text_lower in ("/watch", "watch"):
+        return report_schedule()
     if text_lower == "/regreen":
         threading.Timer(1.5, lambda: subprocess.run(
             ["systemctl", "--user", "restart", "greenclaw-bot.service"]
@@ -606,6 +807,25 @@ def start_tasks():
             reply(route(text, chat_id=chat_id))
         except Exception as e:  # noqa: BLE001
             print(f"[tasks] on_message error: {e}")
+
+    # Wire the scheduler to Telegram so timed jobs push to the right chat.
+    _tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    _tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if _tg_token and _tg_chat:
+        def _sched_reply(text):
+            try:
+                for i in range(0, len(text), 4000):
+                    httpx.post(
+                        f"https://api.telegram.org/bot{_tg_token}/sendMessage",
+                        json={"chat_id": _tg_chat, "text": text[i:i + 4000]},
+                        timeout=30,
+                    )
+            except Exception as e:  # noqa: BLE001
+                print(f"[scheduler] telegram send error: {e}")
+        start_scheduler(_sched_reply)
+    else:
+        print("[scheduler] TELEGRAM_BOT_TOKEN/CHAT_ID not set — scheduler outputs to stdout only")
+        start_scheduler(print)
 
     threads = []
     for mod in tasks:
