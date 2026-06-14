@@ -1,7 +1,7 @@
 ---
 name: llm-bench
 description: Benchmark the local Qwen model with a test prompt and report timing and response quality. Use when the user wants to test, time, or compare local model performance.
-exposes: local
+exposes: cc
 trigger: /bench
 locked: false
 source: owner
