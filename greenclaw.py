@@ -67,7 +67,11 @@ SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json
 
 NOTES_FILE = os.path.expanduser("~/notes.md")
 
+MEMORY_DIR = os.path.expanduser("~/.claude/projects/-home-mrgreen/memory")
+
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
+
+_memory_context = ""  # loaded at boot, refreshed after every save
 
 # Per-chat rolling history for converse_local. Persisted to disk across restarts.
 # Keys are chat_id strings; values are lists of {role, content} dicts.
@@ -117,6 +121,30 @@ def save_history(key):
         os.replace(tmp, HISTORY_FILE)
     except Exception as e:
         print(f"[history] failed to save: {e}")
+
+
+def _load_memory_from_disk():
+    """Read all memory files from CC's memory dir and return a single context block."""
+    if not os.path.isdir(MEMORY_DIR):
+        return ""
+    parts = []
+    for fn in sorted(os.listdir(MEMORY_DIR)):
+        if fn == "MEMORY.md" or not fn.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(MEMORY_DIR, fn)) as f:
+                content = f.read().strip()
+            if content:
+                parts.append(content)
+        except Exception:
+            continue
+    return "\n\n".join(parts)
+
+
+def reload_memory():
+    global _memory_context
+    _memory_context = _load_memory_from_disk()
+    print(f"[memory] loaded {len(_memory_context)} chars from {MEMORY_DIR}")
 
 
 def _build_system():
@@ -204,6 +232,21 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "save_memory",
+        "description": (
+            "Save something to long-term memory so it persists across sessions. "
+            "Use when the user says 'remember', or when you learn something important "
+            "about the user, their preferences, or their system that should persist."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "fact": {"type": "string", "description": "What to remember. Be specific and include context."}
+            },
+            "required": ["fact"],
+        },
+    },
 ]
 
 
@@ -270,6 +313,18 @@ def list_notes(limit=40):
     except (TypeError, ValueError):
         n = 40
     return "".join(lines[-n:]).rstrip()
+
+
+def save_memory(fact):
+    """Delegate to CC to write a structured memory entry, then refresh the local cache."""
+    result = ask_cc(
+        f"Save the following to long-term memory. Choose the most appropriate type "
+        f"(user/feedback/project/reference), write a properly formatted memory file to "
+        f"~/.claude/projects/-home-mrgreen/memory/, and update MEMORY.md with a pointer.\n\n"
+        f"{fact}"
+    )
+    reload_memory()
+    return result
 
 
 def get_daily_cc_calls():
@@ -341,7 +396,8 @@ def ask_cc(prompt):
         return "[error] claude CLI not found"
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
-    prompt = f"[Current date/time: {now} GMT+1]\n\n{prompt}"
+    mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
+    prompt = f"[Current date/time: {now} GMT+1]{mem_block}\n\n{prompt}"
     log_cc_call(prompt)
     print("  [-> Claude Code]")
     try:
@@ -370,6 +426,8 @@ def dispatch_tool(name, inp):
         return list_notes(inp.get("limit", 40))
     if name == "delegate_to_cc":
         return ask_cc(inp.get("query", ""))
+    if name == "save_memory":
+        return save_memory(inp.get("fact", ""))
     return f"[error] unknown tool {name}"
 
 
@@ -405,7 +463,10 @@ def converse_local(text, system_extra=None, chat_id=None):
     chat_id: if provided, rolling history is loaded before the call and saved
              after. None (terminal mode) means no history accumulates.
     """
-    system = SYSTEM if not system_extra else f"{SYSTEM}\n\n--- skill ---\n{system_extra}"
+    mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
+    system = SYSTEM + mem_block
+    if system_extra:
+        system = f"{system}\n\n--- skill ---\n{system_extra}"
     with _history_lock:
         history = list(_history.get(str(chat_id), [])) if chat_id is not None else []
     msgs = (
@@ -766,6 +827,8 @@ def route(text, chat_id=None):
     skill = match_skill_trigger(text_lower)
     if skill:
         return run_skill(skill, text)
+    if text_lower.startswith("remember "):
+        return save_memory(text[9:].strip())
     if text_lower.startswith("cc "):
         return ask_cc(text[3:].strip())
     if text_lower.startswith("gc "):
@@ -876,6 +939,7 @@ def main():
     load_env()
     load_history()
     load_skills()
+    reload_memory()
     threads = start_tasks()
     if sys.stdin.isatty():
         run_terminal()  # tasks run alongside in their threads
