@@ -25,7 +25,7 @@ LAN / sole-user box. Secrets in .env (TELEGRAM_*).
 Deps: pip install httpx
 """
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 import importlib.util
 import json
@@ -555,7 +555,7 @@ def route(text, chat_id=None):
         return report_version()
     if text_lower in ("/cheat", "cheat"):
         return report_cheat()
-    if text_lower == "/reboot":
+    if text_lower == "/regreen":
         threading.Timer(1.5, lambda: subprocess.run(
             ["systemctl", "--user", "restart", "greenclaw-bot.service"]
         )).start()
