@@ -1,7 +1,7 @@
 ---
 name: system-health
 description: Check disk, memory, load, and the bot service. Use when the user asks how the box or server is doing.
-exposes: local
+exposes: cc
 trigger: /health
 locked: false
 source: owner

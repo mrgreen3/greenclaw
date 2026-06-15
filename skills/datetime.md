@@ -1,7 +1,7 @@
 ---
 name: datetime
 description: Report the current date and time.
-exposes: local
+exposes: cc
 trigger: /datetime
 locked: false
 source: owner

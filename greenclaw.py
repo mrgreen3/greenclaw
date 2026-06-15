@@ -6,9 +6,9 @@ Two front ends, one core:
   python greenclaw.py --tasks     run always-on tasks from tasks/ (Telegram etc.)
 
 Per-message channels:
-  <prompt>               -> Qwen first (local); it delegates to Claude Code when needed
-  cc <prompt>            -> force Claude Code CLI (OAuth/Pro, full autonomy)
-  gc <prompt>            -> force local Ollama (Qwen2.5:3b, free, on-device)
+  <prompt>               -> Claude Code (default)
+  cc <prompt>            -> Claude Code CLI (explicit)
+  gc <prompt>            -> force local Ollama (Qwen2.5:3b, on-device)
   /<trigger> ...         -> a skill recipe from skills/
   /watch                 -> show scheduled jobs and when they last ran
   usage / calls          -> CC invocation count today
@@ -56,7 +56,6 @@ CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(_HERE, "skills")
 SKILLS_ALLOW = os.path.join(_HERE, "skills.allow")
-SKILL_BODY_WARN = 6000  # chars; warn if a local skill body is large for Qwen's context
 
 # Tasks: always-on connectors (Telegram, Signal, ...) loaded from tasks/*.py.
 TASKS_DIR = os.path.join(_HERE, "tasks")
@@ -68,6 +67,10 @@ SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json
 NOTES_FILE = os.path.expanduser("~/notes.md")
 
 MEMORY_DIR = os.path.expanduser("~/.claude/projects/-home-mrgreen/memory")
+MEMORY_SIZE_THRESHOLD = 50_000  # bytes — trigger CC compaction when exceeded
+MEMORY_COMPACTION_COOLDOWN = 86_400  # seconds (24h) between auto-compactions
+MEMORY_COMPACTION_STATE = os.path.expanduser("~/.local/share/greenclaw/memory_compaction.json")
+HEARTBEAT_FILE = os.path.expanduser("~/.local/share/greenclaw/heartbeat.jsonl")
 
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
 
@@ -145,6 +148,74 @@ def reload_memory():
     global _memory_context
     _memory_context = _load_memory_from_disk()
     print(f"[memory] loaded {len(_memory_context)} chars from {MEMORY_DIR}")
+
+
+def _memory_total_size():
+    if not os.path.isdir(MEMORY_DIR):
+        return 0
+    total = 0
+    for fn in os.listdir(MEMORY_DIR):
+        if fn.endswith(".md"):
+            try:
+                total += os.path.getsize(os.path.join(MEMORY_DIR, fn))
+            except OSError:
+                pass
+    return total
+
+
+def report_memory_stats():
+    if not os.path.isdir(MEMORY_DIR):
+        return "No memory directory found."
+    files = sorted(fn for fn in os.listdir(MEMORY_DIR) if fn.endswith(".md") and fn != "MEMORY.md")
+    total = _memory_total_size()
+    pct = int(total / MEMORY_SIZE_THRESHOLD * 100)
+    lines = [f"Memory: {len(files)} entries, {total:,} bytes ({pct}% of {MEMORY_SIZE_THRESHOLD//1000}KB compaction threshold)"]
+    for fn in files:
+        try:
+            size = os.path.getsize(os.path.join(MEMORY_DIR, fn))
+            lines.append(f"  {fn[:-3]}: {size:,}b")
+        except OSError:
+            pass
+    return "\n".join(lines)
+
+
+def _check_memory_threshold():
+    """If memory is over the size threshold and hasn't been compacted recently, ask CC to compact."""
+    if _memory_total_size() < MEMORY_SIZE_THRESHOLD:
+        return
+    now = time.time()
+    try:
+        if os.path.exists(MEMORY_COMPACTION_STATE):
+            with open(MEMORY_COMPACTION_STATE) as f:
+                last = json.load(f).get("last_compacted", 0)
+            if now - last < MEMORY_COMPACTION_COOLDOWN:
+                return
+    except Exception:
+        pass
+    print(f"[memory] size threshold exceeded — requesting CC compaction")
+    ask_cc(
+        "Memory has grown large. Review all files in ~/.claude/projects/-home-mrgreen/memory/, "
+        "consolidate overlapping entries, summarise older content into fewer files, and remove "
+        "trivial or outdated facts. Preserve user preferences, recurring patterns, and active "
+        "project context. Update MEMORY.md accordingly."
+    )
+    os.makedirs(os.path.dirname(MEMORY_COMPACTION_STATE), exist_ok=True)
+    try:
+        with open(MEMORY_COMPACTION_STATE, "w") as f:
+            json.dump({"last_compacted": now}, f)
+    except Exception as e:
+        print(f"[memory] could not save compaction state: {e}")
+    reload_memory()
+
+
+def log_heartbeat():
+    os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True)
+    try:
+        rec = {"ts": datetime.now().isoformat(timespec="seconds"), "version": __version__}
+        with open(HEARTBEAT_FILE, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception as e:
+        print(f"[heartbeat] {e}")
 
 
 def _build_system():
@@ -324,6 +395,7 @@ def save_memory(fact):
         f"{fact}"
     )
     reload_memory()
+    _check_memory_threshold()
     return result
 
 
@@ -390,14 +462,27 @@ def report_cheat():
 CC_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 
 
-def ask_cc(prompt):
+def ask_cc(prompt, chat_id=None):
     """Hand the whole job to Claude Code headless, full autonomy."""
     if not os.path.exists(CC_BIN):
         return "[error] claude CLI not found"
 
+    original_prompt = prompt
     now = datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
     mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
-    prompt = f"[Current date/time: {now} GMT+1]{mem_block}\n\n{prompt}"
+
+    hist_block = ""
+    if chat_id is not None:
+        with _history_lock:
+            history = list(_history.get(str(chat_id), []))
+        if history:
+            lines = []
+            for msg in history:
+                role = "Kev" if msg["role"] == "user" else "GreenClaw"
+                lines.append(f"{role}: {msg['content']}")
+            hist_block = "\n\n--- recent conversation ---\n" + "\n".join(lines)
+
+    prompt = f"[Current date/time: {now} GMT+1]{mem_block}{hist_block}\n\n{prompt}"
     log_cc_call(prompt)
     print("  [-> Claude Code]")
     try:
@@ -410,7 +495,19 @@ def ask_cc(prompt):
         err = (p.stderr or "").strip()
         if err:
             out += ("\n[stderr] " + err) if out else ("[stderr] " + err)
-        return out or "(no output)"
+        out = out or "(no output)"
+        if chat_id is not None:
+            key = str(chat_id)
+            with _history_lock:
+                existing = _history.get(key, [])
+                merged = existing + [
+                    {"role": "user", "content": original_prompt},
+                    {"role": "assistant", "content": out},
+                ]
+                _history[key] = merged[-(HISTORY_MAX_TURNS * 2):]
+                _history_updated[key] = time.time()
+            save_history(key)
+        return out
     except subprocess.TimeoutExpired:
         return "[error] Claude Code timed out (15m)"
     except Exception as e:  # noqa: BLE001
@@ -787,20 +884,15 @@ def match_skill_trigger(text):
 
 
 def run_skill(skill, text):
-    """Load the skill body on demand and dispatch to the declared engine."""
+    """Load the skill body on demand and dispatch to Claude Code."""
     try:
         with open(skill["path"]) as f:
             body = parse_front_matter(f.read())[1]
     except Exception as e:  # noqa: BLE001
         return f"[skill error] could not read {skill['path']}: {e}"
     arg = text[len(skill["trigger"]):].strip() if skill["trigger"] else text
-    if skill["exposes"] == "cc":
-        prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
-        return ask_cc(prompt)
-    # local or both: run on Qwen (which can still delegate_to_cc itself if needed)
-    if len(body) > SKILL_BODY_WARN:
-        print(f"[skills] warning: '{skill['name']}' body is {len(body)} chars — may crowd Qwen's {LOCAL_NUM_CTX}-token context")
-    return converse_local(arg or "Run this skill now.", system_extra=body)
+    prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
+    return ask_cc(prompt)
 
 
 def route(text, chat_id=None):
@@ -819,6 +911,8 @@ def route(text, chat_id=None):
         return report_cheat()
     if text_lower in ("/watch", "watch"):
         return report_schedule()
+    if text_lower in ("/memory", "memory stats"):
+        return report_memory_stats()
     if text_lower == "/regreen":
         threading.Timer(1.5, lambda: subprocess.run(
             ["systemctl", "--user", "restart", "greenclaw.service"]
@@ -833,7 +927,7 @@ def route(text, chat_id=None):
         return ask_cc(text[3:].strip())
     if text_lower.startswith("gc "):
         return converse_local(text[3:].strip(), chat_id=chat_id)
-    return converse_local(text, chat_id=chat_id)  # default: Qwen first
+    return ask_cc(text, chat_id=chat_id)  # default: Claude Code
 
 
 def load_tasks():
@@ -940,6 +1034,7 @@ def main():
     load_history()
     load_skills()
     reload_memory()
+    log_heartbeat()
     threads = start_tasks()
     if sys.stdin.isatty():
         run_terminal()  # tasks run alongside in their threads
