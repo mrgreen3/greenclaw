@@ -1,7 +1,7 @@
 ---
 name: weather
 description: Current weather and short forecast for London.
-exposes: local
+exposes: cc
 trigger: /weather
 locked: false
 source: owner
