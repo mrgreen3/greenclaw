@@ -387,16 +387,17 @@ def list_notes(limit=40):
 
 
 def save_memory(fact):
-    """Delegate to CC to write a structured memory entry, then refresh the local cache."""
-    result = ask_cc(
-        f"Save the following to long-term memory. Choose the most appropriate type "
-        f"(user/feedback/project/reference), write a properly formatted memory file to "
-        f"~/.claude/projects/-home-mrgreen/memory/, and update MEMORY.md with a pointer.\n\n"
-        f"{fact}"
-    )
-    reload_memory()
-    _check_memory_threshold()
-    return result
+    """Write a memory note to the greenbrain vault directly."""
+    try:
+        from skills.vault import write_note
+        # Try to split "topic: content" if the fact contains a colon early on
+        if ":" in fact[:40]:
+            topic, content = fact.split(":", 1)
+        else:
+            topic, content = "notes", fact
+        return write_note(topic.strip(), content.strip())
+    except Exception as e:  # noqa: BLE001
+        return f"[memory] {e}"
 
 
 def get_daily_cc_calls():
