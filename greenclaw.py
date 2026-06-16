@@ -680,6 +680,43 @@ def load_skills():
     if blocked:
         print(f"[skills] blocked {len(blocked)} (locked, not in skills.allow): {', '.join(blocked)}")
 
+    # Load Qwen-native Python skills from skills/*.py
+    for fn in sorted(os.listdir(SKILLS_DIR)):
+        if not fn.endswith(".py") or fn.startswith("_"):
+            continue
+        path = os.path.join(SKILLS_DIR, fn)
+        try:
+            spec = importlib.util.spec_from_file_location(f"greenclaw_skills.{fn[:-3]}", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:  # noqa: BLE001
+            print(f"[skills] {fn}: failed to load — {e}")
+            continue
+        if not callable(getattr(mod, "run", None)):
+            print(f"[skills] {fn}: no run() — skipped")
+            continue
+        name = getattr(mod, "NAME", fn[:-3])
+        trigger = getattr(mod, "TRIGGER", "")
+        description = getattr(mod, "DESCRIPTION", "")
+        if trigger and trigger in triggers_seen:
+            print(f"[skills] WARNING: {name} trigger {trigger!r} already claimed by {triggers_seen[trigger]} — ignoring trigger on {name}")
+            trigger = ""
+        elif trigger:
+            triggers_seen[trigger] = name
+        SKILLS[name] = {
+            "name": name,
+            "description": description,
+            "exposes": "qwen",
+            "trigger": trigger,
+            "locked": False,
+            "source": "qwen",
+            "path": path,
+            "module": mod,
+        }
+        loaded.append(f"{name}(qwen)")
+        if not trigger:
+            print(f"[skills] {name}: no trigger — not reachable")
+
 
 # ---------------------------------------------------------------------------
 # SCHEDULER — schedules/*.md define timed jobs; this section owns the watch.
@@ -884,13 +921,18 @@ def match_skill_trigger(text):
 
 
 def run_skill(skill, text):
-    """Load the skill body on demand and dispatch to Claude Code."""
+    """Dispatch to a Qwen Python skill (direct) or a CC markdown skill (via ask_cc)."""
+    arg = text[len(skill["trigger"]):].strip() if skill["trigger"] else text
+    if skill.get("exposes") == "qwen":
+        try:
+            return skill["module"].run(arg)
+        except Exception as e:  # noqa: BLE001
+            return f"[skill error] {skill['name']}: {e}"
     try:
         with open(skill["path"]) as f:
             body = parse_front_matter(f.read())[1]
     except Exception as e:  # noqa: BLE001
         return f"[skill error] could not read {skill['path']}: {e}"
-    arg = text[len(skill["trigger"]):].strip() if skill["trigger"] else text
     prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
     return ask_cc(prompt)
 
