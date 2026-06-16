@@ -484,7 +484,7 @@ def ask_cc(prompt, chat_id=None):
             hist_block = "\n\n--- recent conversation ---\n" + "\n".join(lines)
 
     prompt = f"[Current date/time: {now} GMT+1]{mem_block}{hist_block}\n\n{prompt}"
-    log_cc_call(prompt)
+    log_cc_call(original_prompt)  # log the user's actual request, not the augmented prompt
     print("  [-> Claude Code]")
     try:
         cc_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
