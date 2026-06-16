@@ -1,8 +1,8 @@
 """Greenclaw web dashboard task.
 
 Serves a read-only status page at http://localhost:PORT (default 7070).
-Displays: system vitals, memory vault stats, CC call count, open GitHub
-issues for the greenclaw repo, scheduler heartbeat, and active tasks.
+Displays: system vitals, memory vault stats, CC call count + recent prompts,
+open GitHub issues, scheduled jobs, and recent notes.
 
 Configuration (in .env):
   DASHBOARD_PORT   TCP port to listen on (default: 7070)
@@ -30,14 +30,27 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
-HEARTBEAT_FILE = os.path.expanduser("~/.local/share/greenclaw/heartbeat.jsonl")
 MEMORY_DIR = os.path.expanduser("~/.claude/projects/-home-mrgreen/memory")
 SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json")
+SCHEDULES_DIR = os.path.join(_HERE, "schedules")
+TASKS_DIR = os.path.join(_HERE, "tasks")
+NOTES_FILE = os.path.expanduser("~/notes.md")
 STATIC_DIR = os.path.join(_HERE, "static")
 
 MEMORY_SIZE_THRESHOLD = 50_000
 
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "mrgreen3/greenclaw")
+
+# greenclaw.py version, read once at import for the footer.
+try:
+    _VERSION = "?"
+    with open(os.path.join(_HERE, "greenclaw.py")) as _f:
+        for _line in _f:
+            if _line.startswith("__version__"):
+                _VERSION = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+except Exception:
+    _VERSION = "?"
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +77,7 @@ def system_info():
     except Exception:
         uptime = "unknown"
 
-    # cpu (1-second sample via /proc/stat)
+    # cpu (short sample via /proc/stat)
     try:
         def _cpu_sample():
             with open("/proc/stat") as f:
@@ -173,18 +186,121 @@ def cc_call_stats():
     return {"today": today_count, "week": week_count}
 
 
-def heartbeat_info():
-    if not os.path.exists(HEARTBEAT_FILE):
-        return {"last": "never", "version": "?"}
+def _clean_prompt(text):
+    """Tidy a logged prompt preview for display. Strips a leading
+    [Current date/time: ...] stamp and any memory/history block markers left by
+    older greenclaw versions, then collapses whitespace."""
+    text = text or ""
+    if text.startswith("[Current date/time:"):
+        end = text.find("]")
+        if end != -1:
+            text = text[end + 1:]
+    for marker in ("--- long-term memory ---", "--- recent conversation ---"):
+        idx = text.find(marker)
+        if idx != -1:
+            text = text[:idx]
+    text = " ".join(text.split())
+    return text.strip() or "(memory/context only)"
+
+
+def recent_cc_calls(limit=6):
+    """Return the most recent CC invocations: time + cleaned prompt preview."""
+    if not os.path.exists(CC_LOG_FILE):
+        return []
     try:
-        with open(HEARTBEAT_FILE) as f:
-            lines = [l.strip() for l in f if l.strip()]
-        if lines:
-            last = json.loads(lines[-1])
-            return {"last": last.get("ts", "?"), "version": last.get("version", "?")}
+        with open(CC_LOG_FILE) as f:
+            lines = [l for l in f if l.strip()]
     except Exception:
-        pass
-    return {"last": "?", "version": "?"}
+        return []
+    out = []
+    for line in lines[-limit:][::-1]:
+        try:
+            r = json.loads(line)
+            ts = r.get("ts", "")
+            # show HH:MM from the ISO timestamp
+            t = ts[11:16] if len(ts) >= 16 else ts
+            out.append({"time": t, "prompt": _clean_prompt(r.get("prompt", ""))})
+        except Exception:
+            pass
+    return out
+
+
+def _parse_front_matter(text):
+    """Minimal front-matter parser (mirrors greenclaw.parse_front_matter)."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    meta = {}
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return meta
+        if ":" in lines[i]:
+            k, v = lines[i].split(":", 1)
+            meta[k.strip()] = v.strip()
+    return {}
+
+
+def _days_str(raw):
+    raw = (raw or "daily").strip().lower()
+    if raw in ("daily", "*", ""):
+        return "daily"
+    return raw
+
+
+def scheduled_jobs():
+    """Read schedules/*.md front matter + schedule.json to list timed jobs."""
+    if not os.path.isdir(SCHEDULES_DIR):
+        return []
+    try:
+        with open(SCHEDULE_STATE_FILE) as f:
+            state = json.load(f)
+    except Exception:
+        state = {}
+    jobs = []
+    for fn in sorted(os.listdir(SCHEDULES_DIR)):
+        if not fn.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(SCHEDULES_DIR, fn)) as f:
+                meta = _parse_front_matter(f.read())
+        except Exception:
+            continue
+        schedule = (meta.get("schedule") or "").strip()
+        if not schedule:
+            continue
+        name = meta.get("name") or fn[:-3]
+        last = state.get(name, "never")
+        if last != "never" and len(last) >= 16:
+            last = last[5:16].replace("T", " ")  # MM-DD HH:MM
+        jobs.append({
+            "name": name,
+            "schedule": schedule,
+            "days": _days_str(meta.get("days", "daily")),
+            "skill": (meta.get("skill") or "").strip(),
+            "last": last,
+        })
+    return jobs
+
+
+def recent_notes(limit=6):
+    """Return the last few lines of the notes file."""
+    try:
+        with open(NOTES_FILE) as f:
+            lines = [l.rstrip() for l in f if l.strip()]
+    except Exception:
+        return []
+    return lines[-limit:][::-1]
+
+
+def active_tasks():
+    """List task module names present in tasks/ (excludes _ prefixed)."""
+    if not os.path.isdir(TASKS_DIR):
+        return []
+    names = []
+    for fn in sorted(os.listdir(TASKS_DIR)):
+        if fn.endswith(".py") and not fn.startswith("_"):
+            names.append(fn[:-3])
+    return names
 
 
 def github_issues():
@@ -323,6 +439,34 @@ a:hover { text-decoration: underline; }
 .mem-row:last-of-type { border-bottom: none; }
 .mem-key { color: #777; }
 .mem-val { color: #7BC950; }
+.sched {
+  padding: 6px 0;
+  border-bottom: 1px solid #1e1e1e;
+}
+.sched:last-of-type { border-bottom: none; }
+.sched-head { display: flex; justify-content: space-between; font-size: 15px; }
+.sched-name { color: #ccc; }
+.sched-name .arrow { color: #7BC950; }
+.sched-time { color: #7BC950; }
+.sched-meta { font-size: 13px; color: #555; margin-top: 1px; }
+.logline {
+  padding: 6px 0;
+  border-bottom: 1px solid #1e1e1e;
+  font-size: 14px;
+  display: flex;
+  gap: 12px;
+}
+.logline:last-of-type { border-bottom: none; }
+.logline .t { color: #7BC950; flex-shrink: 0; }
+.logline .p { color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note {
+  padding: 5px 0;
+  border-bottom: 1px solid #1e1e1e;
+  font-size: 14px;
+  color: #aaa;
+}
+.note:last-of-type { border-bottom: none; }
+.empty { color: #555; font-size: 14px; padding: 6px 0; }
 .footer {
   background: #111;
   border-top: 1px solid #1e1e1e;
@@ -333,7 +477,7 @@ a:hover { text-decoration: underline; }
   gap: 20px;
   flex-wrap: wrap;
 }
-.footer .hb { color: #7BC950; }
+.footer .tasks { color: #7BC950; }
 </style>
 """
 
@@ -346,9 +490,12 @@ def _pct_class(pct, warn=60, bad=85):
     return "good"
 
 
-def render_html(sys, mem, cc, hb, issues):
+def _esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def render_html(sys, mem, cc, issues, jobs, calls, notes, tasks):
     now = datetime.now().strftime("%d %b %Y — %H:%M %Z").strip()
-    version = hb.get("version", "?")
 
     # --- system panel ---
     cpu_cls = _pct_class(sys["cpu_pct"])
@@ -358,7 +505,7 @@ def render_html(sys, mem, cc, hb, issues):
     sys_panel = f"""
 <div class="panel">
   <div class="label">system</div>
-  <div class="row"><span class="key">host</span><span class="val orange">{sys['hostname']}</span></div>
+  <div class="row"><span class="key">host</span><span class="val orange">{_esc(sys['hostname'])}</span></div>
   <div class="row"><span class="key">uptime</span><span class="val good">{sys['uptime']}</span></div>
   <div class="row"><span class="key">cpu</span><span class="val {cpu_cls}">{sys['cpu_pct']}%</span></div>
   <div class="bar-wrap"><div class="bar {cpu_cls}" style="width:{sys['cpu_pct']}%"></div></div>
@@ -375,7 +522,7 @@ def render_html(sys, mem, cc, hb, issues):
     mem_cls2 = _pct_class(mem_pct, warn=70, bad=90)
     mem_files_html = ""
     for f in mem.get("files", []):
-        mem_files_html += f'<div class="mem-row"><span class="mem-key">{f["name"]}</span><span class="mem-val">{f["size"]:,} b</span></div>\n'
+        mem_files_html += f'<div class="mem-row"><span class="mem-key">{_esc(f["name"])}</span><span class="mem-val">{f["size"]:,} b</span></div>\n'
     if not mem_files_html:
         mem_files_html = '<div class="mem-row"><span class="mem-key">(empty)</span></div>'
 
@@ -395,16 +542,49 @@ def render_html(sys, mem, cc, hb, issues):
 </div>
 """
 
+    # --- scheduler panel ---
+    sched_html = ""
+    for j in jobs:
+        arrow = f' <span class="arrow">→ {_esc(j["skill"])}</span>' if j["skill"] else ""
+        sched_html += f"""
+<div class="sched">
+  <div class="sched-head"><span class="sched-name">{_esc(j['name'])}{arrow}</span><span class="sched-time">{_esc(j['schedule'])}</span></div>
+  <div class="sched-meta">{_esc(j['days'])} · last ran: {_esc(j['last'])}</div>
+</div>"""
+    if not sched_html:
+        sched_html = '<div class="empty">no schedules loaded</div>'
+
+    sched_panel = f"""
+<div class="panel">
+  <div class="label">scheduled jobs</div>
+  {sched_html}
+</div>
+"""
+
+    # --- recent notes panel ---
+    notes_html = ""
+    for n in notes:
+        notes_html += f'<div class="note">{_esc(n)}</div>\n'
+    if not notes_html:
+        notes_html = '<div class="empty">no notes yet</div>'
+
+    notes_panel = f"""
+<div class="panel">
+  <div class="label">recent notes</div>
+  {notes_html}
+</div>
+"""
+
     # --- issues panel ---
     issues_html = ""
     for issue in issues:
-        labels_html = "".join(f'<span class="label-pill">{l}</span>' for l in issue["labels"])
+        labels_html = "".join(f'<span class="label-pill">{_esc(l)}</span>' for l in issue["labels"])
         num = issue["number"]
-        link = f'<a href="{issue["url"]}" target="_blank">#{num}</a>' if issue["url"] else f"#{num}"
+        link = f'<a href="{_esc(issue["url"])}" target="_blank">#{num}</a>' if issue["url"] else f"#{num}"
         issues_html += f"""
 <div class="issue">
-  <div class="issue-title">{link} — {issue['title']}</div>
-  <div class="issue-meta">{issue['created_at']} {labels_html}</div>
+  <div class="issue-title">{link} — {_esc(issue['title'])}</div>
+  <div class="issue-meta">{_esc(issue['created_at'])} {labels_html}</div>
 </div>
 """
     if not issues_html:
@@ -417,10 +597,25 @@ def render_html(sys, mem, cc, hb, issues):
 </div>
 """
 
+    # --- recent CC calls panel ---
+    calls_html = ""
+    for c in calls:
+        calls_html += f'<div class="logline"><span class="t">{_esc(c["time"])}</span><span class="p">{_esc(c["prompt"])}</span></div>\n'
+    if not calls_html:
+        calls_html = '<div class="empty">no calls logged yet</div>'
+
+    calls_panel = f"""
+<div class="panel-full">
+  <div class="label">recent claude code prompts</div>
+  {calls_html}
+</div>
+"""
+
+    tasks_str = ", ".join(tasks) if tasks else "none"
     footer = f"""
 <div class="footer">
-  <span class="hb">&#x2665; last heartbeat: {hb.get('last','?')}</span>
-  <span>v{version}</span>
+  <span>tasks: <span class="tasks">{_esc(tasks_str)}</span></span>
+  <span>v{_VERSION}</span>
   <span>auto-refresh every 30s</span>
 </div>
 """
@@ -456,7 +651,12 @@ def render_html(sys, mem, cc, hb, issues):
   {sys_panel}
   {cc_panel}
 </div>
+<div class="grid">
+  {sched_panel}
+  {notes_panel}
+</div>
 {issues_panel}
+{calls_panel}
 {footer}
 </body>
 </html>
@@ -478,12 +678,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"not found")
             return
         try:
-            sys = system_info()
-            mem = memory_stats()
-            cc = cc_call_stats()
-            hb = heartbeat_info()
-            issues = github_issues()
-            html = render_html(sys, mem, cc, hb, issues)
+            html = render_html(
+                system_info(),
+                memory_stats(),
+                cc_call_stats(),
+                github_issues(),
+                scheduled_jobs(),
+                recent_cc_calls(),
+                recent_notes(),
+                active_tasks(),
+            )
             body = html.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
