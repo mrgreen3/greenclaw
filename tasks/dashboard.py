@@ -228,7 +228,7 @@ body {
   font-family: 'Courier New', Courier, monospace;
   background: #111;
   color: #ccc;
-  font-size: 13px;
+  font-size: 16px;
   min-height: 100vh;
 }
 a { color: #7BC950; text-decoration: none; }
@@ -241,15 +241,15 @@ a:hover { text-decoration: underline; }
   align-items: center;
   justify-content: space-between;
 }
-.logo { color: #7BC950; font-size: 16px; font-weight: bold; letter-spacing: 0.1em; }
+.logo { color: #7BC950; font-size: 20px; font-weight: bold; letter-spacing: 0.1em; }
 .badge {
-  font-size: 10px; padding: 2px 8px;
+  font-size: 13px; padding: 2px 8px;
   border-radius: 3px;
   background: #1c3a12;
   color: #7BC950;
   margin-left: 10px;
 }
-.ts { font-size: 11px; color: #555; }
+.ts { font-size: 14px; color: #999; }
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -267,8 +267,8 @@ a:hover { text-decoration: underline; }
   border-top: 1px solid #1e1e1e;
 }
 .label {
-  font-size: 10px;
-  color: #444;
+  font-size: 13px;
+  color: #888;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   margin-bottom: 10px;
@@ -277,13 +277,14 @@ a:hover { text-decoration: underline; }
   display: flex;
   justify-content: space-between;
   margin-bottom: 5px;
-  font-size: 12px;
+  font-size: 15px;
 }
 .key { color: #666; }
 .val { color: #bbb; }
-.val.good { color: #7BC950; }
-.val.warn { color: #E9A836; }
-.val.bad  { color: #D05050; }
+.val.good   { color: #7BC950; }
+.val.warn   { color: #E9A836; }
+.val.bad    { color: #D05050; }
+.val.orange { color: #E8830A; }
 .bar-wrap {
   height: 3px;
   background: #222;
@@ -301,11 +302,11 @@ a:hover { text-decoration: underline; }
   background: #1a1a1a;
   border-radius: 0 4px 4px 0;
 }
-.issue-title { color: #ccc; font-size: 12px; margin-bottom: 2px; }
-.issue-meta  { color: #555; font-size: 10px; }
+.issue-title { color: #ccc; font-size: 15px; margin-bottom: 2px; }
+.issue-meta  { color: #555; font-size: 13px; }
 .label-pill {
   display: inline-block;
-  font-size: 9px;
+  font-size: 12px;
   padding: 1px 6px;
   border-radius: 3px;
   background: #2a2a2a;
@@ -317,7 +318,7 @@ a:hover { text-decoration: underline; }
   justify-content: space-between;
   padding: 4px 0;
   border-bottom: 1px solid #1e1e1e;
-  font-size: 12px;
+  font-size: 15px;
 }
 .mem-row:last-of-type { border-bottom: none; }
 .mem-key { color: #777; }
@@ -326,8 +327,8 @@ a:hover { text-decoration: underline; }
   background: #111;
   border-top: 1px solid #1e1e1e;
   padding: 8px 20px;
-  font-size: 10px;
-  color: #444;
+  font-size: 13px;
+  color: #888;
   display: flex;
   gap: 20px;
   flex-wrap: wrap;
@@ -357,7 +358,7 @@ def render_html(sys, mem, cc, hb, issues):
     sys_panel = f"""
 <div class="panel">
   <div class="label">system</div>
-  <div class="row"><span class="key">host</span><span class="val">{sys['hostname']}</span></div>
+  <div class="row"><span class="key">host</span><span class="val orange">{sys['hostname']}</span></div>
   <div class="row"><span class="key">uptime</span><span class="val good">{sys['uptime']}</span></div>
   <div class="row"><span class="key">cpu</span><span class="val {cpu_cls}">{sys['cpu_pct']}%</span></div>
   <div class="bar-wrap"><div class="bar {cpu_cls}" style="width:{sys['cpu_pct']}%"></div></div>
@@ -386,7 +387,7 @@ def render_html(sys, mem, cc, hb, issues):
 
   <div class="label" style="margin-top:14px">memory vault</div>
   {mem_files_html}
-  <div class="row" style="margin-top:8px; font-size:11px">
+  <div class="row" style="margin-top:8px; font-size:14px">
     <span class="key">{mem.get('total',0):,} b</span>
     <span class="val {mem_cls2}">{mem_pct}% of {MEMORY_SIZE_THRESHOLD//1000}KB threshold</span>
   </div>
@@ -435,7 +436,17 @@ def render_html(sys, mem, cc, hb, issues):
 </head>
 <body>
 <div class="topbar">
-  <div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg" style="height:32px;width:32px;flex-shrink:0">
+      <defs><linearGradient id="lobster-gradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#22c55e"/><stop offset="100%" stop-color="#15803d"/></linearGradient></defs>
+      <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" fill="url(#lobster-gradient)"/>
+      <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" fill="url(#lobster-gradient)"/>
+      <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" fill="url(#lobster-gradient)"/>
+      <path d="M45 15 Q35 5 30 8" stroke="#22c55e" stroke-width="3" stroke-linecap="round"/>
+      <path d="M75 15 Q85 5 90 8" stroke="#22c55e" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="45" cy="35" r="6" fill="#050810"/><circle cx="75" cy="35" r="6" fill="#050810"/>
+      <circle cx="46" cy="34" r="2.5" fill="#00e5cc"/><circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
+    </svg>
     <span class="logo">greenclaw</span>
     <span class="badge">&#x25CF; running</span>
   </div>
