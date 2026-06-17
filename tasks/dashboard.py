@@ -591,7 +591,7 @@ def render_html(sys, mem, cc, issues, jobs, calls, notes, tasks):
         issues_html = '<div class="issue"><div class="issue-title">no open issues</div></div>'
 
     issues_panel = f"""
-<div class="panel-full">
+<div class="panel">
   <div class="label">open github issues — {GITHUB_REPO}</div>
   {issues_html}
 </div>
@@ -605,7 +605,7 @@ def render_html(sys, mem, cc, issues, jobs, calls, notes, tasks):
         calls_html = '<div class="empty">no calls logged yet</div>'
 
     calls_panel = f"""
-<div class="panel-full">
+<div class="panel">
   <div class="label">recent claude code prompts</div>
   {calls_html}
 </div>
@@ -655,8 +655,10 @@ def render_html(sys, mem, cc, issues, jobs, calls, notes, tasks):
   {sched_panel}
   {notes_panel}
 </div>
-{issues_panel}
-{calls_panel}
+<div class="grid" style="border-top:1px solid #1e1e1e">
+  {issues_panel}
+  {calls_panel}
+</div>
 {footer}
 </body>
 </html>
@@ -707,7 +709,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 def start(on_message):
     """Start the dashboard HTTP server in a daemon thread.
     on_message is accepted for API compatibility but not used.
+    Set DASHBOARD_ENABLED=0 in .env to skip starting the server.
     """
+    if os.environ.get("DASHBOARD_ENABLED", "1").strip().lower() in ("0", "false", "no"):
+        print("[dashboard] disabled via DASHBOARD_ENABLED — not starting")
+        return
     port = int(os.environ.get("DASHBOARD_PORT", 7070))
     host = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
     server = HTTPServer((host, port), DashboardHandler)
