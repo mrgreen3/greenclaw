@@ -9,6 +9,7 @@ Per-message channels:
   <prompt>               -> Claude Code (default)
   cc <prompt>            -> Claude Code CLI (explicit)
   gc <prompt>            -> force local Ollama (Qwen2.5:3b, on-device)
+  gg <prompt>            -> Gemini 2.5 Flash (Google AI Studio)
   /<trigger> ...         -> a skill recipe from skills/
   /watch                 -> show scheduled jobs and when they last ran
   usage / calls          -> CC invocation count today
@@ -44,6 +45,10 @@ import httpx
 # Local model channel: Ollama on the box — free, for the run_shell loop.
 LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "qwen2.5:3b-instruct")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+
+# Gemini channel: Google AI Studio REST API.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 LOCAL_NUM_CTX = 8192
 LOCAL_MAX_STEPS = 8
 
@@ -613,6 +618,30 @@ def converse_local(text, system_extra=None, chat_id=None):
     return reply
 
 
+def converse_gemini(text):
+    """Send a single message to Gemini via Google AI Studio REST API."""
+    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    if not api_key:
+        return "[gemini] GOOGLE_API_KEY not set in .env"
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={api_key}"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM}]},
+        "contents": [{"role": "user", "parts": [{"text": text}]}],
+    }
+    try:
+        r = httpx.post(url, json=payload, timeout=60)
+        r.raise_for_status()
+        candidates = r.json().get("candidates", [])
+        if not candidates:
+            return "[gemini] no response"
+        return candidates[0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        return f"[gemini error] {e}"
+
+
 def parse_front_matter(text):
     """Split a skill file into (metadata dict, body). Front matter is a --- fenced
     block of trivial key: value lines at the top. Returns ({}, text) if absent."""
@@ -970,6 +999,8 @@ def route(text, chat_id=None):
         return ask_cc(text[3:].strip())
     if text_lower.startswith("gc "):
         return converse_local(text[3:].strip(), chat_id=chat_id)
+    if text_lower.startswith("gg "):
+        return converse_gemini(text[3:].strip())
     return ask_cc(text, chat_id=chat_id)  # default: Claude Code
 
 
