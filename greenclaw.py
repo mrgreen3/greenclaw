@@ -8,8 +8,7 @@ Two front ends, one core:
 Per-message channels:
   <prompt>               -> Claude Code (default)
   cc <prompt>            -> Claude Code CLI (explicit)
-  gc <prompt>            -> force local Ollama (Qwen2.5:3b, on-device)
-  gg <prompt>            -> Gemini 2.5 Flash (Google AI Studio)
+  gg <prompt>            -> Gemini 2.5 Flash (force)
   /<trigger> ...         -> a skill recipe from skills/
   /watch                 -> show scheduled jobs and when they last ran
   usage / calls          -> CC invocation count today
@@ -28,7 +27,7 @@ LAN / sole-user box. Secrets in .env (TELEGRAM_*).
 Deps: pip install httpx
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import importlib.util
 import json
@@ -42,15 +41,9 @@ from datetime import datetime
 
 import httpx
 
-# Local model channel: Ollama on the box — free, for the run_shell loop.
-LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "qwen2.5:3b-instruct")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
-
 # Gemini channel: Google AI Studio REST API.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-LOCAL_NUM_CTX = 8192
-LOCAL_MAX_STEPS = 8
+GEMINI_MAX_STEPS = 8
 
 # Cap run_shell output so a chatty command can't blow the local context or Telegram.
 SHELL_MAX_OUTPUT = 6000  # chars
@@ -234,7 +227,7 @@ def _build_system():
         os_name = "Linux"
     try:
         probe = subprocess.check_output(
-            "which pacman yay systemctl journalctl git python ollama claude 2>/dev/null",
+            "which pacman yay systemctl journalctl git python claude 2>/dev/null",
             shell=True, text=True,
         ).strip()
         tools = ", ".join(os.path.basename(t) for t in probe.splitlines() if t)
@@ -534,16 +527,17 @@ def dispatch_tool(name, inp):
     return f"[error] unknown tool {name}"
 
 
-def _ollama_tools():
-    tools = [
-        {"type": "function", "function": {
+def _gemini_tools():
+    """Build Gemini-format tool declarations for run_shell, notes, memory, and CC delegation."""
+    decls = [
+        {
             "name": t["name"],
             "description": t["description"],
             "parameters": t["input_schema"],
-        }}
+        }
         for t in TOOLS
     ]
-    tools.append({"type": "function", "function": {
+    decls.append({
         "name": "delegate_to_cc",
         "description": (
             "Delegate to Claude Code when you cannot handle a task yourself — "
@@ -555,55 +549,82 @@ def _ollama_tools():
             "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
             "required": ["query"],
         },
-    }})
-    return tools
+    })
+    return [{"functionDeclarations": decls}]
 
 
-def converse_local(text, system_extra=None, chat_id=None):
-    """Route to local Ollama — free, on-device, no cloud.
+def converse_gemini(text, system_extra=None, chat_id=None):
+    """Route to Gemini 2.5 Flash with tool-calling loop, history, and CC delegation.
 
-    system_extra: optional skill body, appended to SYSTEM for this run only.
-    chat_id: if provided, rolling history is loaded before the call and saved
-             after. None (terminal mode) means no history accumulates.
+    system_extra: optional skill body appended to SYSTEM for this run only.
+    chat_id: if provided, rolling history is loaded before and saved after.
     """
+    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    if not api_key:
+        return "[gemini] GOOGLE_API_KEY not set in .env"
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={api_key}"
+    )
     mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
     system = SYSTEM + mem_block
     if system_extra:
         system = f"{system}\n\n--- skill ---\n{system_extra}"
+
+    # Build contents from history (translate stored {role,content} → Gemini format).
     with _history_lock:
-        history = list(_history.get(str(chat_id), [])) if chat_id is not None else []
-    msgs = (
-        [{"role": "system", "content": system}]
-        + history
-        + [{"role": "user", "content": text}]
-    )
-    parts = []
-    for _ in range(LOCAL_MAX_STEPS):
+        stored = list(_history.get(str(chat_id), [])) if chat_id is not None else []
+    contents = []
+    for m in stored:
+        g_role = "model" if m["role"] == "assistant" else "user"
+        contents.append({"role": g_role, "parts": [{"text": m["content"]}]})
+    contents.append({"role": "user", "parts": [{"text": text}]})
+
+    text_parts = []
+    for _ in range(GEMINI_MAX_STEPS):
+        payload = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": contents,
+            "tools": _gemini_tools(),
+        }
         try:
-            r = httpx.post(OLLAMA_URL, json={
-                "model": LOCAL_MODEL,
-                "messages": msgs,
-                "tools": _ollama_tools(),
-                "stream": False,
-                "options": {"num_ctx": LOCAL_NUM_CTX, "temperature": 0},
-            }, timeout=300)
-            m = r.json().get("message", {})
+            r = httpx.post(url, json=payload, timeout=120)
+            r.raise_for_status()
+            candidates = r.json().get("candidates", [])
+            if not candidates:
+                return "[gemini] no response"
+            parts = candidates[0]["content"]["parts"]
         except Exception as e:  # noqa: BLE001
-            return f"[local error] {e}"
-        msgs.append(m)
-        if (m.get("content") or "").strip():
-            parts.append(m["content"])
-        calls = m.get("tool_calls")
-        if not calls:
+            return f"[gemini error] {e}"
+
+        # Collect any text parts from this turn.
+        for p in parts:
+            if "text" in p and p["text"].strip():
+                text_parts.append(p["text"].strip())
+
+        # Find function calls.
+        fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+        if not fn_calls:
             break
-        for tc in calls:
-            fn = tc.get("function", {}).get("name", "")
-            args = tc.get("function", {}).get("arguments") or {}
-            preview = args.get('command') or args.get('query') or args.get('text') or ''
+
+        # Append model turn, then dispatch each tool and append results.
+        contents.append({"role": "model", "parts": parts})
+        tool_results = []
+        for fc in fn_calls:
+            fn = fc.get("name", "")
+            args = fc.get("args") or {}
+            preview = args.get("command") or args.get("query") or args.get("text") or ""
             print(f"  [g:{fn}] {preview[:120]}")
-            msgs.append({"role": "tool", "content": dispatch_tool(fn, args), "name": fn})
-    reply = "\n".join(parts).strip() or "(no reply)"
-    # Save history: append this user/assistant pair and trim to the rolling window.
+            result = dispatch_tool(fn, args)
+            tool_results.append({
+                "functionResponse": {
+                    "name": fn,
+                    "response": {"output": result},
+                }
+            })
+        contents.append({"role": "user", "parts": tool_results})
+
+    reply = "\n".join(text_parts).strip() or "(no reply)"
     if chat_id is not None:
         key = str(chat_id)
         with _history_lock:
@@ -616,30 +637,6 @@ def converse_local(text, system_extra=None, chat_id=None):
             _history_updated[key] = time.time()
         save_history(key)
     return reply
-
-
-def converse_gemini(text):
-    """Send a single message to Gemini via Google AI Studio REST API."""
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
-    if not api_key:
-        return "[gemini] GOOGLE_API_KEY not set in .env"
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={api_key}"
-    )
-    payload = {
-        "systemInstruction": {"parts": [{"text": SYSTEM}]},
-        "contents": [{"role": "user", "parts": [{"text": text}]}],
-    }
-    try:
-        r = httpx.post(url, json=payload, timeout=60)
-        r.raise_for_status()
-        candidates = r.json().get("candidates", [])
-        if not candidates:
-            return "[gemini] no response"
-        return candidates[0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:
-        return f"[gemini error] {e}"
 
 
 def parse_front_matter(text):
@@ -898,7 +895,7 @@ def _run_schedule(sched):
                 original = f.read()
             _, body = parse_front_matter(original)
             augmented_body = f"{body}\n\nAdditional instruction: {note}"
-            return converse_local("Run this skill now.", system_extra=augmented_body)
+            return converse_gemini("Run this skill now.", system_extra=augmented_body)
         return run_skill(skill, "")
     elif note:
         return route(note)
@@ -997,10 +994,8 @@ def route(text, chat_id=None):
         return save_memory(text[9:].strip())
     if text_lower.startswith("cc "):
         return ask_cc(text[3:].strip())
-    if text_lower.startswith("gc "):
-        return converse_local(text[3:].strip(), chat_id=chat_id)
     if text_lower.startswith("gg "):
-        return converse_gemini(text[3:].strip())
+        return converse_gemini(text[3:].strip(), chat_id=chat_id)
     return ask_cc(text, chat_id=chat_id)  # default: Claude Code
 
 
@@ -1089,8 +1084,8 @@ def keepalive(threads):
 
 
 def run_terminal():
-    print("router ready — Qwen handles messages and calls Claude Code when needed. "
-          "Prefix `cc ` to force Claude Code, `gc ` to force local. Ctrl-D to quit.\n")
+    print("router ready — Gemini handles messages and calls Claude Code when needed. "
+          "Prefix `cc ` to force Claude Code, `gg ` to force Gemini. Ctrl-D to quit.\n")
     while True:
         try:
             user = input("> ").strip()

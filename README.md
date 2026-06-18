@@ -12,7 +12,7 @@ Single Python file. Lean, auditable, yours.
 
 ## What it does
 
-GreenClaw sits on a headless Lenovo M710q (Arch Linux, ~10W idle) and listens for Telegram messages via long-poll. Each message is routed to the right AI backend depending on what you need. Results come back to Telegram.
+GreenClaw sits on a headless Lenovo M920q (Arch Linux, ~10W idle) and listens for Telegram messages via long-poll. Each message is routed to the right AI backend depending on what you need. Results come back to Telegram.
 
 It can run shell commands on the server, take notes, answer questions, and hand off complex tasks to Claude Code for full agentic autonomy — all from a phone. It maintains per-chat rolling conversation history, so follow-up messages work naturally without repeating context. New capabilities are added as [skills](#skills) (markdown recipes you drop in a folder) and new ways to talk to it are added as [tasks](#tasks) (small Python connectors).
 
@@ -24,16 +24,16 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 
 | Prefix | Goes to | Cost |
 |--------|---------|------|
-| _(anything)_ | Qwen first — delegates to Claude Code when it needs more reach | Free unless it delegates |
+| _(anything)_ | Claude Code (default) | Pro subscription (no per-token billing) |
 | `cc <prompt>` | Forces Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
-| `gc <prompt>` | Forces local Ollama (Qwen2.5:3b) | Free — runs on the box |
+| `gg <prompt>` | Forces Gemini 2.5 Flash | Free tier (Google AI Studio) |
 | `/<trigger> …` | A skill recipe (see [Skills](#skills)) | Free or subscription, per skill |
 | `/cheat` | Built-in cheat sheet — prefixes, commands, loaded skills | — |
 | `usage` / `calls` | CC invocation count today | — |
 
-**Default path** (no prefix) goes to the local model first. Qwen handles what it can on the box and delegates to Claude Code itself when a request needs more reach — email, the web, GitHub, or anything multi-step. Claude Code runs headlessly via your claude.ai Pro OAuth session, only when something actually calls for it.
+**Default path** (no prefix) goes straight to Claude Code via your claude.ai Pro OAuth session. For lighter tasks where you want a faster response, use `gg` to route to Gemini 2.5 Flash instead.
 
-**Force a model** when you want to skip the triage: `cc <prompt>` goes straight to Claude Code, `gc <prompt>` stays on local Qwen. Qwen is zero cloud, zero cost — instant for routine tasks like checking system state or running commands.
+**Force a model** when you want to be explicit: `cc <prompt>` goes straight to Claude Code, `gg <prompt>` routes to Gemini. Gemini runs on Google's free tier — fast for routine tasks like checking system state, running commands, or taking notes.
 
 ### Tools available to the AI
 
@@ -48,13 +48,13 @@ Claude Code has full autonomy: web search, file access, GitHub, email, anything 
 ```
 Incoming message (Telegram or other task)
     │
-    ├── /<trigger> …    →  matching skill recipe       →  local or CC, per skill
+    ├── /<trigger> …    →  matching skill recipe       →  Gemini or CC, per skill
     ├── cc <prompt>     →  Claude Code CLI (OAuth/Pro)  →  forced
-    ├── gc <prompt>     →  Ollama (local, Qwen2.5:3b)   →  forced
+    ├── gg <prompt>     →  Gemini 2.5 Flash (tools)    →  forced
     ├── /cheat          →  built-in cheat sheet         →  no LLM
     ├── usage / calls   →  CC invocation count          →  no LLM
     │
-    └── anything else   →  Qwen first  →  delegates to Claude Code only when needed
+    └── anything else   →  Claude Code (default)
 ```
 
 The core gateway is dispatch-only — it doesn't know or care which connector a message came in on. [Tasks](#tasks) own the connectors (Telegram today, others later); the same routing applies to all.
@@ -73,7 +73,7 @@ A skill is a recipe — instructions the assistant follows — not a plugin or a
 ---
 name: system-health
 description: Check disk, memory, load, and the bot service. Use when the user asks how the box is doing.
-exposes: local          # local (Qwen) | cc (Claude Code) | both
+exposes: cc             # cc (Claude Code) | gg (Gemini) | both
 trigger: /health        # the command that runs it
 locked: false           # true = must be armed in skills.allow before it runs
 source: owner           # who wrote it — for auditing
@@ -83,7 +83,7 @@ Run df -h, free -h and uptime, then summarise in a few lines.
 Flag anything that looks off. Don't suggest fixes unless something's wrong.
 ```
 
-Send `/health` and the recipe runs. Anything you type after the trigger is passed straight through as input, so `/post write about the M710q build` hands that prompt to the `blog-post` skill.
+Send `/health` and the recipe runs. Anything you type after the trigger is passed straight through as input, so `/post write about the M920q build` hands that prompt to the `blog-post` skill.
 
 **Loaded lean.** At startup the gateway reads only each skill's front matter — never the body — so skills don't eat into the local model's context just by existing. The full recipe is loaded from disk only on the turn it actually runs.
 
@@ -107,7 +107,7 @@ def start(on_message):
     # and chat_id is a string identifying the conversation (for history tracking).
 ```
 
-Tasks load at boot and each runs in its own daemon thread, so a long Claude Code call on one channel doesn't freeze the others. The core routing (`cc `, `gc `, `/<trigger>`, etc.) is shared between every task.
+Tasks load at boot and each runs in its own daemon thread, so a long Claude Code call on one channel doesn't freeze the others. The core routing (`cc `, `gg `, `/<trigger>`, etc.) is shared between every task.
 
 **Shipped.** `tasks/telegram.py` — long-polls the Telegram Bot API, locks to a single chat ID, dispatches each incoming message in a worker thread so 15-minute CC calls never stall the poll loop. Sends a `typing…` indicator before dispatching so the chat feels responsive during longer calls.
 
@@ -119,11 +119,11 @@ Tasks load at boot and each runs in its own daemon thread, so a long Claude Code
 
 GreenClaw was designed around a simple principle: **don't burn resources you don't need to**.
 
-**Hardware**: The Lenovo M710q is a mini PC that draws around 10W at idle, 35W under load. It was already running 24/7. GreenClaw adds negligible overhead to a box that would be on anyway.
+**Hardware**: The Lenovo M920q is a mini PC that draws around 10W at idle, 35W under load. It was already running 24/7. GreenClaw adds negligible overhead to a box that would be on anyway.
 
 **No GPU**: Most personal AI setups assume you need a GPU. GreenClaw doesn't — it routes to the right tool for the job rather than running a large local model constantly.
 
-**Local first by default**: Qwen2.5:3b runs on-device via Ollama and is the first responder for every message. For simple tasks — check a log, run a command, look something up — it never leaves the house. No API call, no cloud inference, no energy spent in a data centre.
+**Free tier for lightweight work**: Gemini 2.5 Flash handles shell commands, notes, quick lookups, and anything that doesn't need Claude Code's full reach. Google's free tier is generous — no cost for everyday use.
 
 **Subscription over metered for heavy work**: For tasks that need a capable model, GreenClaw delegates to Claude Code using an OAuth session tied to a flat-rate Pro subscription. The cost is fixed regardless of usage — no incentive to minimise tokens at the expense of quality, and no surprise bills from heavy use.
 
@@ -140,7 +140,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 - You want a polished, point-and-click setup
 - You need it to work on Windows or macOS (Linux only, intentionally)
 - You're looking for a hosted service — this runs on your hardware, your network
-- You want a large capable local model — GreenClaw is built around small, efficient ones
+- You want everything running locally with no cloud — GreenClaw relies on Claude Code (OAuth) and Gemini (free tier)
 
 ---
 
@@ -149,7 +149,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 ### Requirements
 
 - Python 3.11+
-- [Ollama](https://ollama.com) with `qwen2.5:3b-instruct` pulled
+- A Google AI Studio API key (free — [aistudio.google.com](https://aistudio.google.com))
 - Claude Code CLI installed and logged in (`claude login`)
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
 
@@ -168,6 +168,7 @@ cp .env.example .env   # fill in your keys
 ```
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...   # your Telegram user ID — locks the bot to you only
+GOOGLE_API_KEY=...     # Google AI Studio key for Gemini
 ```
 
 To find your chat ID: leave `TELEGRAM_CHAT_ID` blank, start the bot, message it — it will report your ID. Set it and restart.
@@ -221,7 +222,7 @@ systemctl --user restart greenclaw.service
 
 ## Hardware
 
-Lenovo M710q Tiny — Intel Core i5, 16GB RAM, 234GB NVMe, running SwayBang Linux (Arch-based). Headless, boots to TTY. Accessible via Tailscale and SSH.
+Lenovo M920q Tiny — Intel Core i5, 16GB RAM, 234GB NVMe, running SwayBang Linux (Arch-based). Headless, boots to TTY. Accessible via Tailscale and SSH.
 
 ---
 
@@ -238,10 +239,10 @@ Done so far:
 - [Skills](#skills) — static gateway, markdown recipes, explicit triggers, lock file
 - [Tasks](#tasks) — pluggable always-on connectors (Telegram today, room for more)
 - Built-in `/cheat` cheat sheet driven by `static/cheat.md`
-- Per-chat rolling history — Qwen remembers the last 10 exchanges per conversation; context survives within a session (in-memory; cleared on restart — see [#7](https://github.com/mrgreen3/greenclaw/issues/7))
+- Per-chat rolling history — the last 10 exchanges per conversation are preserved; context survives within a session (in-memory; cleared on restart — see [#7](https://github.com/mrgreen3/greenclaw/issues/7))
 - Telegram typing indicator — `typing…` sent before dispatching so the chat feels live during longer calls
-- Runtime-aware system prompt — at startup, `_build_system()` reads `/etc/os-release` and probes installed tools via `which`, so Qwen knows the actual OS and what's available without being told each time
-- System management via natural language — common sysadmin phrases (`update system`, `disk space`, `what's running`) are handled immediately via `run_shell` without asking for clarification; Qwen knows it's on Arch and uses `pacman`, not `apt`
+- Runtime-aware system prompt — at startup, `_build_system()` reads `/etc/os-release` and probes installed tools via `which`, so the AI knows the actual OS and what's available without being told each time
+- System management via natural language — common sysadmin phrases (`update system`, `disk space`, `what's running`) are handled immediately via `run_shell` without asking for clarification; Gemini knows it's on Arch and uses `pacman`, not `apt`
 
 ---
 
