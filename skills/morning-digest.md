@@ -1,16 +1,13 @@
 ---
 name: morning-digest
-description: Combined morning briefing — mail summary and system health. Runs at 5am daily.
+description: Morning system health check. Runs at 5am daily.
 exposes: cc
 trigger: /digest
 locked: false
 source: owner
 ---
 
-Produce a morning digest for Kev. Use UK date format (e.g. 14 June 2026). Two sections, keep it terse:
-
-**Mail**
-Check Gmail for anything received since yesterday. One line each: sender — subject — the gist. Skip newsletters and automated notifications unless they're urgent. If nothing notable, say so. Read-only — do not reply, archive, label, or delete anything.
+Produce a morning system health check for Kev. Use UK date format (e.g. 14 June 2026). Keep it terse:
 
 **System**
 Run these and flag anything that looks off:
