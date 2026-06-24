@@ -71,6 +71,7 @@ MEMORY_COMPACTION_STATE = os.path.expanduser("~/.local/share/greenclaw/memory_co
 HEARTBEAT_FILE = os.path.expanduser("~/.local/share/greenclaw/heartbeat.jsonl")
 
 SKILLS = {}  # name -> {description, exposes, trigger, locked, source, path}; filled at boot
+_trigger_map = {}  # trigger (lowercase) -> skill name; filled by load_skills()
 
 _memory_context = ""  # loaded at boot, refreshed after every save
 
@@ -217,7 +218,7 @@ def log_heartbeat():
 
 
 def _build_system():
-    """Build the Qwen system prompt from real runtime facts gathered once at startup."""
+    """Build the Gemini system prompt from real runtime facts gathered once at startup."""
     try:
         raw = subprocess.check_output(
             "grep PRETTY_NAME /etc/os-release", shell=True, text=True
@@ -527,30 +528,22 @@ def dispatch_tool(name, inp):
     return f"[error] unknown tool {name}"
 
 
-def _gemini_tools():
-    """Build Gemini-format tool declarations for run_shell, notes, memory, and CC delegation."""
-    decls = [
-        {
-            "name": t["name"],
-            "description": t["description"],
-            "parameters": t["input_schema"],
-        }
-        for t in TOOLS
-    ]
-    decls.append({
-        "name": "delegate_to_cc",
-        "description": (
-            "Delegate to Claude Code when you cannot handle a task yourself — "
-            "e.g. checking email/Gmail, searching the web, or anything requiring "
-            "external access you don't have. Returns Claude Code's reply."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
-            "required": ["query"],
-        },
-    })
-    return [{"functionDeclarations": decls}]
+_GEMINI_TOOLS = [{"functionDeclarations": [
+    {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}
+    for t in TOOLS
+] + [{
+    "name": "delegate_to_cc",
+    "description": (
+        "Delegate to Claude Code when you cannot handle a task yourself — "
+        "e.g. checking email/Gmail, searching the web, or anything requiring "
+        "external access you don't have. Returns Claude Code's reply."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
+        "required": ["query"],
+    },
+}]}]
 
 
 def converse_gemini(text, system_extra=None, chat_id=None):
@@ -585,7 +578,7 @@ def converse_gemini(text, system_extra=None, chat_id=None):
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": contents,
-            "tools": _gemini_tools(),
+            "tools": _GEMINI_TOOLS,
         }
         try:
             r = httpx.post(url, json=payload, timeout=120)
@@ -660,6 +653,7 @@ def load_skills():
     """Index skills/*.md at boot — front matter only, never the body. Applies the
     skills.allow lock to locked skills and logs what loaded / was blocked."""
     SKILLS.clear()
+    _trigger_map.clear()
     if not os.path.isdir(SKILLS_DIR):
         print("[skills] no skills/ directory — none loaded")
         return
@@ -690,6 +684,7 @@ def load_skills():
             trigger = ""
         elif trigger:
             triggers_seen[trigger] = name
+            _trigger_map[trigger.lower()] = name
         SKILLS[name] = {
             "name": name,
             "description": meta.get("description", ""),
@@ -730,6 +725,7 @@ def load_skills():
             trigger = ""
         elif trigger:
             triggers_seen[trigger] = name
+            _trigger_map[trigger.lower()] = name
         SKILLS[name] = {
             "name": name,
             "description": description,
@@ -941,10 +937,8 @@ def start_scheduler(reply_fn):
 def match_skill_trigger(text):
     """Return the skill whose trigger is the first whitespace token of text, else None."""
     first = text.split(None, 1)[0] if text.split() else ""
-    for skill in SKILLS.values():
-        if skill["trigger"] and skill["trigger"].lower() == first:
-            return skill
-    return None
+    name = _trigger_map.get(first)
+    return SKILLS.get(name) if name else None
 
 
 def run_skill(skill, text):
