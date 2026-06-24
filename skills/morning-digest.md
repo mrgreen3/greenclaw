@@ -7,15 +7,23 @@ locked: false
 source: owner
 ---
 
-Produce a morning system health check for Kev. Use UK date format (e.g. 14 June 2026). Keep it terse:
+Generate a brief morning digest for Kev (UK date format, e.g. 14 June 2026). Only include actionable items, skip noise:
 
-**System**
-Run these and flag anything that looks off:
-- `df -h /`
-- `free -h`
-- `uptime`
-- `systemctl --user is-active greenclaw.service`
-- `checkupdates 2>/dev/null | wc -l` (pending Arch updates — flag if 10 or more)
-- `sensors 2>/dev/null | grep -i 'temp\|core' | head -5` (skip if not installed)
+**Scheduled jobs**
+List any jobs from ~/.local/share/greenclaw/schedule.json that are due today or overdue.
 
-End with a single summary line: either "All good 🟢" or "Needs attention 🔴".
+**GitHub issues** (mrgreen3/greenclaw)
+Fetch open issues. Count only; if >0, list them:
+```
+<N> open issues:
+  - <title1>
+  - <title2>
+```
+
+**Critical system issues only**
+Check `systemctl --user is-active greenclaw.service` — flag if not "active".
+Flag if disk / is >90% used (`df -h /`).
+
+Skip routine health (uptime, load, RAM usage, update count) — those are on-demand via `/sysinfo`.
+
+**Format:** Terse, one paragraph per section. No summary line unless critical issue found.

@@ -20,7 +20,9 @@ import os
 import subprocess
 import threading
 import time
+import urllib.request
 from datetime import datetime
+from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ---------------------------------------------------------------------------
@@ -305,7 +307,6 @@ def active_tasks():
 
 def github_issues():
     """Fetch open issues from the GitHub API. Returns list of dicts."""
-    import urllib.request
     owner, repo = GITHUB_REPO.split("/", 1)
     url = f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=10"
     headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "greenclaw-dashboard"}
@@ -491,7 +492,7 @@ def _pct_class(pct, warn=60, bad=85):
 
 
 def _esc(s):
-    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    return escape(str(s))
 
 
 def render_html(sys, mem, cc, issues, jobs, calls, notes, tasks):
