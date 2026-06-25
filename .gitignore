@@ -7,3 +7,5 @@ cc_calls.jsonl
 bot.log
 *.log
 CLAUDE.md
+skills/
+schedules/
