@@ -40,6 +40,9 @@ CC_TIMEOUT = 600
 
 POLL_SECONDS = 60
 API = "https://api.github.com"
+INBOX_ACTIVE_FLAG = Path.home() / ".local/share/greenclaw/inbox_active"
+
+NAME = "github_inbox"
 # -----------------------------------------------------------------------------
 
 
@@ -165,23 +168,46 @@ def run_once():
         task = f"{issue['title']}\n\n{issue.get('body') or ''}".strip()
         try:
             result = dispatch_to_cc(task)
-            comment(n, f"\u2705 Done.\n\n```\n{result[:60000]}\n```")
+            comment(n, f"✅ Done.\n\n```\n{result[:60000]}\n```")
             close_issue(n)
         except Exception as e:
-            comment(n, f"\u274c Failed: {e}")
+            comment(n, f"❌ Failed: {e}")
             close_issue(n)
 
 
-def main():
-    ensure_label()
-    print(f"github_inbox: watching {OWNER}/{REPO} every {POLL_SECONDS}s")
+def start(on_message):
+    """Always-on GitHub bridge watcher. Polls for gc-cmd issues only when
+    the inbox_active flag file exists. When flag is absent, sleeps cheaply
+    (no GitHub calls). Automatically removes the flag after draining all issues.
+
+    on_message callback is unused; this task is pure polling."""
+
+    ensure_label_called = False
+
     while True:
+        if not INBOX_ACTIVE_FLAG.exists():
+            time.sleep(30)
+            continue
+
+        if not ensure_label_called:
+            ensure_label()
+            ensure_label_called = True
+
         try:
             run_once()
         except Exception as e:
-            print(f"poll error: {e}", file=sys.stderr)
+            print(f"[github_inbox] poll error: {e}", file=sys.stderr)
+
+        try:
+            state = load_state()
+            processed = set(state["processed"])
+            remaining = [i for i in list_commands() if i["number"] not in processed]
+
+            if not remaining:
+                print("[github_inbox] all issues processed — deactivating inbox")
+                INBOX_ACTIVE_FLAG.unlink(missing_ok=True)
+                ensure_label_called = False
+        except Exception as e:
+            print(f"[github_inbox] could not check remaining issues: {e}", file=sys.stderr)
+
         time.sleep(POLL_SECONDS)
-
-
-if __name__ == "__main__":
-    main()
