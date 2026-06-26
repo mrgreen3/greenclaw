@@ -63,6 +63,7 @@ SCHEDULES_DIR = os.path.join(_HERE, "schedules")
 SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json")
 
 NOTES_FILE = os.path.expanduser("~/notes.md")
+INBOX_ACTIVE_FLAG = os.path.expanduser("~/.local/share/greenclaw/inbox_active")
 
 MEMORY_DIR = os.path.expanduser("~/.claude/projects/-home-mrgreen/memory")
 MEMORY_SIZE_THRESHOLD = 50_000  # bytes — trigger CC compaction when exceeded
@@ -976,6 +977,14 @@ def route(text, chat_id=None):
         return report_schedule()
     if text_lower in ("/memory", "memory stats"):
         return report_memory_stats()
+    if text_lower == "/inbox on":
+        os.makedirs(os.path.dirname(INBOX_ACTIVE_FLAG), exist_ok=True)
+        open(INBOX_ACTIVE_FLAG, 'a').close()
+        return "📬 inbox watching active"
+    if text_lower == "/inbox off":
+        if os.path.exists(INBOX_ACTIVE_FLAG):
+            os.remove(INBOX_ACTIVE_FLAG)
+        return "📭 inbox watching off"
     if text_lower == "/regreen":
         threading.Timer(1.5, lambda: subprocess.run(
             ["systemctl", "--user", "restart", "greenclaw.service"]
