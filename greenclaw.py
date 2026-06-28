@@ -1045,7 +1045,14 @@ def route(text, chat_id=None):
     Code itself when it needs more reach. `cc ` forces Claude Code; `gc ` forces local.
     chat_id: passed through to converse_local for per-chat history tracking.
     """
-    text_lower = text.lower()
+    # Email messages arrive as "[email subject: ...]\n{body}" — strip the header
+    # for prefix routing but keep it for inference context.
+    prefix_text = text
+    if text.startswith("[email subject:"):
+        lines = text.split("\n", 1)
+        prefix_text = lines[1].strip() if len(lines) > 1 else text
+
+    text_lower = prefix_text.lower()
     if text_lower in ("usage", "calls"):
         return report_usage()
     if text_lower in ("/version", "version"):
@@ -1075,10 +1082,10 @@ def route(text, chat_id=None):
     if text_lower.startswith("remember "):
         return save_memory(text[9:].strip())
     if text_lower.startswith("cc "):
-        return ask_cc(text[3:].strip())
+        return ask_cc(prefix_text[3:].strip())
     if text_lower.startswith("gg "):
-        return converse_gemini(text[3:].strip(), chat_id=chat_id)
-    return ask_cc(text, chat_id=chat_id)  # default: Claude Code
+        return converse_gemini(prefix_text[3:].strip(), chat_id=chat_id)
+    return ask_cc(text, chat_id=chat_id)  # default: Claude Code (full text for context)
 
 
 def load_tasks():
