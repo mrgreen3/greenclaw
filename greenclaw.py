@@ -318,6 +318,22 @@ TOOLS = [
             "required": ["fact"],
         },
     },
+    {
+        "name": "send_email",
+        "description": (
+            "Send an email to the user (mr.k.clarke@gmail.com). Optionally attach a local file. "
+            "Use for sharing files, images, or any content better delivered by email than chat."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string", "description": "Email subject line."},
+                "body": {"type": "string", "description": "Plain-text email body."},
+                "attachment_path": {"type": "string", "description": "Absolute or ~-relative path to a file to attach. Omit if no attachment needed."},
+            },
+            "required": ["subject", "body"],
+        },
+    },
 ]
 
 
@@ -526,6 +542,9 @@ def dispatch_tool(name, inp):
         return ask_cc(inp.get("query", ""))
     if name == "save_memory":
         return save_memory(inp.get("fact", ""))
+    if name == "send_email":
+        err = send_email(inp.get("subject", ""), inp.get("body", ""), inp.get("attachment_path"))
+        return err or "email sent"
     return f"[error] unknown tool {name}"
 
 
@@ -743,6 +762,61 @@ def load_skills():
 
 
 # ---------------------------------------------------------------------------
+# EMAIL SEND UTILITY
+# ---------------------------------------------------------------------------
+
+def send_email(subject, body, attachment_path=None):
+    """Send an email using EMAIL_* env vars. Optionally attach a file. Returns error string or None."""
+    import smtplib
+    import mimetypes
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.base import MIMEBase
+    from email import encoders
+
+    smtp_host = os.environ.get("EMAIL_SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
+    email_addr = os.environ.get("EMAIL_ADDRESS", "").strip()
+    email_pass = os.environ.get("EMAIL_PASSWORD", "").strip()
+    trusted = os.environ.get("EMAIL_TRUSTED_SENDERS", "").strip()
+    to_addr = trusted.split(",")[0].strip() if trusted else ""
+
+    if not all([smtp_host, email_addr, email_pass, to_addr]):
+        return "[email] EMAIL_SMTP_HOST, EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_TRUSTED_SENDERS required"
+
+    try:
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = email_addr
+        msg["To"] = to_addr
+        msg.attach(MIMEText(body, "plain"))
+
+        if attachment_path:
+            attachment_path = os.path.expanduser(attachment_path)
+            mime_type, _ = mimetypes.guess_type(attachment_path)
+            maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
+            with open(attachment_path, "rb") as f:
+                part = MIMEBase(maintype, subtype)
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=os.path.basename(attachment_path))
+            msg.attach(part)
+
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
+                smtp.login(email_addr, email_pass)
+                smtp.sendmail(email_addr, to_addr, msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+                smtp.starttls()
+                smtp.login(email_addr, email_pass)
+                smtp.sendmail(email_addr, to_addr, msg.as_string())
+        print(f"[email] sent to {to_addr}" + (f" with attachment {os.path.basename(attachment_path)}" if attachment_path else ""))
+    except Exception as e:  # noqa: BLE001
+        return f"[email send error] {e}"
+
+
+# ---------------------------------------------------------------------------
 # SCHEDULER — schedules/*.md define timed jobs; this section owns the watch.
 # ---------------------------------------------------------------------------
 
@@ -920,7 +994,12 @@ def start_scheduler(reply_fn):
                     result = f"[scheduler error] {sched['name']}: {e}"
                 state[sched["name"]] = now.isoformat()
                 _save_schedule_state(state)
-                reply_fn(f"⏰ {sched['name']}\n\n{result}")
+                if sched.get("output") == "email":
+                    err = send_email(f"⏰ {sched['name']}", result)
+                    if err:
+                        reply_fn(err)
+                else:
+                    reply_fn(f"⏰ {sched['name']}\n\n{result}")
             # Sleep until the next whole minute.
             sleep_secs = 60 - datetime.now().second
             time.sleep(max(sleep_secs, 1))
