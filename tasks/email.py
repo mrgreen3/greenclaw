@@ -1,0 +1,172 @@
+"""Email task — polls IMAP inbox and sends responses via SMTP.
+
+A task is an always-on connector: it owns one interface (here, Email) and
+speaks one tiny protocol with the core:
+
+    start(on_message)                    called once, in a dedicated thread; loop forever
+    on_message(text, reply, chat_id)     call this per incoming message;
+                                         reply(text) sends the answer back
+
+Config (in .env):
+    EMAIL_IMAP_HOST           IMAP server hostname
+    EMAIL_IMAP_PORT           IMAP port (usually 993)
+    EMAIL_SMTP_HOST           SMTP server hostname
+    EMAIL_SMTP_PORT           SMTP port (usually 587)
+    EMAIL_ADDRESS             Email address (greenclaw@archbang.org)
+    EMAIL_PASSWORD            Email password
+    EMAIL_TRUSTED_SENDERS     Comma-separated list of trusted senders (default: mr.k.clarke@gmail.com)
+"""
+
+import os
+import threading
+import time
+import imaplib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.parser import Parser
+
+NAME = "email"
+DESCRIPTION = "Email task via IMAP/SMTP"
+
+
+def start(on_message):
+    imap_host = os.environ.get("EMAIL_IMAP_HOST", "").strip()
+    imap_port = int(os.environ.get("EMAIL_IMAP_PORT", "993"))
+    smtp_host = os.environ.get("EMAIL_SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
+    email_addr = os.environ.get("EMAIL_ADDRESS", "").strip()
+    email_pass = os.environ.get("EMAIL_PASSWORD", "").strip()
+    trusted_senders = os.environ.get("EMAIL_TRUSTED_SENDERS", "mr.k.clarke@gmail.com").strip().split(",")
+    trusted_senders = [s.strip().lower() for s in trusted_senders if s.strip()]
+
+    if not all([imap_host, smtp_host, email_addr, email_pass, trusted_senders]):
+        print("[email] EMAIL_IMAP_HOST, EMAIL_SMTP_HOST, EMAIL_ADDRESS, EMAIL_PASSWORD, "
+              "and EMAIL_TRUSTED_SENDERS (default: mr.k.clarke@gmail.com) required — task not started")
+        return
+
+    print(f"[email] running — listening on {email_addr} (trusted senders: {', '.join(trusted_senders)})")
+
+    def send_reply(recipient, subject, body):
+        """Send an email reply via SMTP."""
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = email_addr
+            msg["To"] = recipient
+            msg.attach(MIMEText(body, "plain"))
+
+            # Port 465 = SMTPS (implicit TLS); port 587 = SMTP + STARTTLS
+            if smtp_port == 465:
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
+                    smtp.login(email_addr, email_pass)
+                    smtp.sendmail(email_addr, recipient, msg.as_string())
+            else:
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+                    smtp.starttls()
+                    smtp.login(email_addr, email_pass)
+                    smtp.sendmail(email_addr, recipient, msg.as_string())
+            print(f"[email] reply sent to {recipient}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[email send error] {e}")
+
+    last_uid = None  # Track last processed UID to avoid re-processing
+
+    while True:
+        try:
+            # Connect to IMAP
+            mail = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=30)
+            mail.login(email_addr, email_pass)
+            mail.select("INBOX")
+
+            # Search for unread messages
+            status, msg_ids = mail.search(None, "UNSEEN")
+            if status != "OK":
+                print("[email] IMAP search failed")
+                mail.close()
+                mail.logout()
+                time.sleep(30)
+                continue
+
+            msg_list = msg_ids[0].split()
+            if not msg_list:
+                # No new messages, sleep and retry
+                mail.close()
+                mail.logout()
+                time.sleep(30)
+                continue
+
+            # Process each message
+            for msg_id in msg_list:
+                try:
+                    status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                    if status != "OK":
+                        continue
+
+                    # Parse email
+                    msg_bytes = msg_data[0][1]
+                    parser = Parser()
+                    email_msg = parser.parsestr(msg_bytes.decode("utf-8", errors="ignore"))
+
+                    sender = email_msg.get("From", "").lower()
+                    subject = email_msg.get("Subject", "(no subject)").strip()
+                    reply_to = email_msg.get("Reply-To") or sender
+
+                    # Extract sender address (handle "Name <email@example.com>" format)
+                    sender_email = sender.split("<")[-1].rstrip(">") if "<" in sender else sender
+
+                    # Check if sender is trusted
+                    if sender_email not in trusted_senders:
+                        print(f"[email] blocked — untrusted sender: {sender_email}")
+                        mail.store(msg_id, "+FLAGS", "\\Seen")
+                        continue
+
+                    # Extract body (plain text preferred)
+                    body = ""
+                    if email_msg.is_multipart():
+                        for part in email_msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                                break
+                    else:
+                        body = email_msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+
+                    body = body.strip()
+                    if not body:
+                        print(f"[email] empty body from {sender_email}, skipping")
+                        mail.store(msg_id, "+FLAGS", "\\Seen")
+                        continue
+
+                    # Build text for routing (include subject for context)
+                    text = f"[email subject: {subject}]\n{body}"
+
+                    print(f"[email] from {sender_email}: {subject[:50]}")
+
+                    # Dispatch in a worker thread to keep IMAP connection free
+                    def _dispatch(text=text, subject=subject, reply_to_addr=reply_to):
+                        try:
+                            def _reply(response_text):
+                                send_reply(reply_to_addr, f"Re: {subject}", response_text)
+                            on_message(text, _reply, "email")
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[email dispatch error] {e}")
+
+                    threading.Thread(target=_dispatch, daemon=True).start()
+
+                    # Mark as read
+                    mail.store(msg_id, "+FLAGS", "\\Seen")
+
+                except Exception as e:  # noqa: BLE001
+                    print(f"[email] message processing error: {e}")
+                    continue
+
+            mail.close()
+            mail.logout()
+            time.sleep(30)  # Poll every 30 seconds
+
+        except imaplib.IMAP4.error as e:
+            print(f"[email] IMAP error: {e}")
+            time.sleep(30)
+        except Exception as e:  # noqa: BLE001
+            print(f"[email] connection error: {e}")
+            time.sleep(30)
