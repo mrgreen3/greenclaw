@@ -1090,7 +1090,7 @@ def route(text, chat_id=None):
         return converse_gemini(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
         return converse_gemini(text, chat_id=chat_id)  # email default: Gemini tool loop
-    return converse_gemini(text, chat_id=chat_id)  # default: Gemini (Ollama offline)
+    return ask_cc(text, chat_id=chat_id)  # Telegram default: CC
 
 
 def load_tasks():
