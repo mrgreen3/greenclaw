@@ -85,6 +85,10 @@ HISTORY_MAX_TURNS = 10  # pairs (user + assistant); older turns are dropped
 HISTORY_FILE = os.path.expanduser("~/.local/share/greenclaw/history.json")
 HISTORY_TTL_DAYS = 7  # discard entries older than this on load
 
+OLLAMA_URL = "http://localhost:11434"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_IDLE_TIMEOUT = 600  # seconds before auto-shutdown after last use
+
 
 def load_history():
     global _history, _history_updated
@@ -477,6 +481,78 @@ def report_cheat():
 
 
 CC_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+
+
+_ollama_proc = None
+_ollama_timer = None
+_ollama_lock = threading.Lock()
+
+
+def _shutdown_ollama():
+    global _ollama_proc, _ollama_timer
+    with _ollama_lock:
+        if _ollama_proc and _ollama_proc.poll() is None:
+            _ollama_proc.terminate()
+            print("[ollama] shut down after idle timeout")
+        _ollama_proc = None
+        _ollama_timer = None
+
+
+def _ensure_ollama():
+    """Start ollama serve if not running; reset the idle shutdown timer."""
+    global _ollama_proc, _ollama_timer
+    with _ollama_lock:
+        # Cancel any pending shutdown
+        if _ollama_timer:
+            _ollama_timer.cancel()
+            _ollama_timer = None
+        # Check if already reachable (may have been started externally)
+        try:
+            httpx.get(f"{OLLAMA_URL}/api/tags", timeout=2)
+            running = True
+        except Exception:
+            running = False
+        if not running:
+            print("[ollama] starting on-demand…")
+            _ollama_proc = subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            # Wait up to 15s for it to become ready
+            for _ in range(15):
+                time.sleep(1)
+                try:
+                    httpx.get(f"{OLLAMA_URL}/api/tags", timeout=1)
+                    break
+                except Exception:
+                    pass
+            else:
+                raise RuntimeError("ollama failed to start")
+            print("[ollama] ready")
+        # Schedule shutdown after idle timeout
+        _ollama_timer = threading.Timer(OLLAMA_IDLE_TIMEOUT, _shutdown_ollama)
+        _ollama_timer.daemon = True
+        _ollama_timer.start()
+
+
+def converse_local_ondemand(text, chat_id=None):
+    """Fallback inference via local Qwen (Ollama). Starts Ollama on demand."""
+    try:
+        _ensure_ollama()
+    except Exception as e:
+        return f"[qwen] could not start ollama: {e}"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
+    mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
+    messages = [{"role": "user", "content": f"[{now} GMT+1]{mem_block}\n\n{text}"}]
+    try:
+        r = httpx.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
+            timeout=120,
+        )
+        return r.json()["message"]["content"].strip()
+    except Exception as e:
+        return f"[qwen] {e}"
 
 
 def ask_cc(prompt, chat_id=None):
@@ -1090,7 +1166,11 @@ def route(text, chat_id=None):
         return converse_gemini(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
         return converse_gemini(text, chat_id=chat_id)  # email default: Gemini tool loop
-    return ask_cc(text, chat_id=chat_id)  # Telegram default: CC
+    result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
+    if result.startswith("[error]"):
+        print(f"[route] CC failed ({result}), falling back to Qwen")
+        return converse_local_ondemand(text, chat_id=chat_id)
+    return result
 
 
 def load_tasks():
