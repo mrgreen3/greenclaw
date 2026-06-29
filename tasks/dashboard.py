@@ -717,6 +717,7 @@ def start(on_message):
         return
     port = int(os.environ.get("DASHBOARD_PORT", 7070))
     host = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
+    HTTPServer.allow_reuse_address = True
     server = HTTPServer((host, port), DashboardHandler)
     print(f"[dashboard] listening on http://{host}:{port}/dashboard")
     server.serve_forever()

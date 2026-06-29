@@ -1035,6 +1035,8 @@ def run_skill(skill, text):
     except Exception as e:  # noqa: BLE001
         return f"[skill error] could not read {skill['path']}: {e}"
     prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
+    if skill.get("exposes") == "gg":
+        return converse_gemini(prompt)
     return ask_cc(prompt)
 
 
@@ -1048,7 +1050,8 @@ def route(text, chat_id=None):
     # Email messages arrive as "[email subject: ...]\n{body}" — strip the header
     # for prefix routing but keep it for inference context.
     prefix_text = text
-    if text.startswith("[email subject:"):
+    is_email = text.startswith("[email subject:")
+    if is_email:
         lines = text.split("\n", 1)
         prefix_text = lines[1].strip() if len(lines) > 1 else text
 
@@ -1085,7 +1088,9 @@ def route(text, chat_id=None):
         return ask_cc(prefix_text[3:].strip())
     if text_lower.startswith("gg "):
         return converse_gemini(prefix_text[3:].strip(), chat_id=chat_id)
-    return ask_cc(text, chat_id=chat_id)  # default: Claude Code (full text for context)
+    if is_email:
+        return converse_gemini(text, chat_id=chat_id)  # email default: Gemini tool loop
+    return converse_gemini(text, chat_id=chat_id)  # default: Gemini (Ollama offline)
 
 
 def load_tasks():
