@@ -129,5 +129,114 @@ class CloudToolsTests(unittest.TestCase):
             self.assertIn("parameters", t["function"])
 
 
+class ConverseCloudTests(unittest.TestCase):
+    def setUp(self):
+        # Snapshot module attributes so the suite is restored after these tests.
+        self._saved = {
+            "GC_CLOUD_MODEL": gc.GC_CLOUD_MODEL,
+            "GC_CLOUD_FALLBACK": gc.GC_CLOUD_FALLBACK,
+            "CLOUD_CHAIN": gc.CLOUD_CHAIN,
+            "_ensure_ollama": gc._ensure_ollama,
+            "_memory_context": gc._memory_context,
+            "call_cloud_model": gc.call_cloud_model,
+            "dispatch_tool": gc.dispatch_tool,
+            "notify_telegram": gc.notify_telegram,
+            "ask_cc": gc.ask_cc,
+        }
+        self._saved_history = dict(gc._history)
+        # Default chain for tests.
+        gc.GC_CLOUD_MODEL = "glm-5.2:cloud"
+        gc.GC_CLOUD_FALLBACK = "kimi-k2.7-code:cloud"
+        gc.CLOUD_CHAIN = [gc.GC_CLOUD_MODEL, gc.GC_CLOUD_FALLBACK]
+        gc._ensure_ollama = lambda: None
+        gc._memory_context = ""
+        gc._history.clear()
+
+        self.calls = []       # model call sequence
+        self.dispatched = []  # tool dispatches
+        self.notifications = []
+        self.cc_calls = []
+
+        def fake_call(model, messages, tools):
+            self.calls.append(model)
+            return self._script.pop(0)
+        gc.call_cloud_model = fake_call
+
+        def fake_dispatch(name, args):
+            self.dispatched.append((name, args))
+            return "tool-result"
+        gc.dispatch_tool = fake_dispatch
+
+        gc.notify_telegram = lambda t: self.notifications.append(t)
+        gc.ask_cc = lambda text, chat_id=None: (self.cc_calls.append(text) or "cc-reply")
+
+    def tearDown(self):
+        gc.__dict__.update(self._saved)
+        gc._history.clear()
+        gc._history.update(self._saved_history)
+
+    def _reply(self, content, tool_calls=None):
+        return (content, tool_calls or [])
+
+    def test_primary_serves_plain_reply(self):
+        self._script = [self._reply("hello from glm")]
+        out = gc.converse_cloud("hi", chat_id="42")
+        self.assertEqual(out, "hello from glm")
+        self.assertEqual(self.calls, ["glm-5.2:cloud"])
+        self.assertEqual(self.notifications, [])
+        self.assertEqual(self.cc_calls, [])
+
+    def test_falls_back_to_secondary_and_notifies(self):
+        self._script = [
+            gc.CloudCallError("http", 502),     # primary fails
+            self._reply("hello from kimi"),      # secondary serves
+        ]
+        out = gc.converse_cloud("hi")
+        self.assertEqual(out, "hello from kimi")
+        self.assertEqual(self.calls, ["glm-5.2:cloud", "kimi-k2.7-code:cloud"])
+        self.assertEqual(len(self.notifications), 1)
+        self.assertIn("cloud fallback", self.notifications[0])
+        self.assertIn("glm-5.2:cloud", self.notifications[0])
+        self.assertIn("kimi-k2.7-code:cloud", self.notifications[0])
+
+    def test_exhaustion_escalates_to_cc_and_notifies_urgent(self):
+        self._script = [
+            gc.CloudCallError("transport", None),
+            gc.CloudCallError("http", 500),
+        ]
+        out = gc.converse_cloud("hi", chat_id="9")
+        self.assertEqual(out, "cc-reply")
+        self.assertEqual(len(self.notifications), 1)
+        self.assertIn("cloud tier exhausted", self.notifications[0])
+        self.assertEqual(self.cc_calls, ["hi"])
+
+    def test_tool_loop_dispatches_then_returns_text(self):
+        self._script = [
+            self._reply("", [{"name": "run_shell", "arguments": {"command": "ls"}}]),
+            self._reply("done", []),
+        ]
+        out = gc.converse_cloud("list files", chat_id="1")
+        self.assertEqual(out, "done")
+        self.assertEqual(self.dispatched, [("run_shell", {"command": "ls"})])
+
+    def test_email_path_withholds_run_shell(self):
+        # Verify allow_shell=False reaches the tools layer by intercepting call_cloud_model.
+        seen_tools = []
+        def spy(model, messages, tools):
+            seen_tools.append(tools)
+            return ("ok", [])
+        gc.call_cloud_model = spy
+        gc.converse_cloud("hi", allow_shell=False)
+        names = sorted(t["function"]["name"] for t in seen_tools[0])
+        self.assertNotIn("run_shell", names)
+
+    def test_history_saved_on_success(self):
+        self._script = [self._reply("reply")]
+        gc.converse_cloud("hi", chat_id="7")
+        self.assertIn("7", gc._history)
+        roles = [m["role"] for m in gc._history["7"]]
+        self.assertEqual(roles, ["user", "assistant"])
+
+
 if __name__ == "__main__":
     unittest.main()

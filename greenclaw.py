@@ -89,6 +89,10 @@ OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_IDLE_TIMEOUT = 600  # seconds before auto-shutdown after last use
 CLOUD_SEMAPHORE = threading.Semaphore(3)  # Ollama Cloud: 3 concurrent models
+GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
+GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "kimi-k2.7-code:cloud")
+CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
+CLOUD_MAX_STEPS = 8
 
 
 def _tz_stamp():
@@ -674,6 +678,93 @@ def _cloud_tools(allow_shell=True):
         },
     })
     return out
+
+
+def _cloud_tool_loop(model, messages, tools):
+    """Run the tool-calling loop for one model. Returns the final reply text.
+
+    Works on a copy of `messages` so a mid-loop failure leaves the caller's
+    transcript clean for a retry on the next chain model. Raises CloudCallError
+    on any hard failure from call_cloud_model. Bounded by CLOUD_MAX_STEPS.
+    """
+    msgs = list(messages)
+    text_parts = []
+    for _ in range(CLOUD_MAX_STEPS):
+        result = call_cloud_model(model, msgs, tools)
+        if isinstance(result, CloudCallError):
+            raise result
+        content, tool_calls = result
+        if content:
+            text_parts.append(content)
+        if not tool_calls:
+            break
+        msgs.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("arguments") or {}
+            preview = args.get("command") or args.get("query") or args.get("text") or ""
+            print(f"  [c:{name}] {preview[:120]}")
+            result = dispatch_tool(name, args)
+            msgs.append({"role": "tool", "name": name, "content": str(result)})
+    return "\n".join(p for p in text_parts if p.strip()) or "(no reply)"
+
+
+def converse_cloud(text, system_extra=None, chat_id=None, allow_shell=True):
+    """Route to the cloud tier (Ollama :cloud models) with a tool-calling loop,
+    a two-model fallback chain, Telegram notify-on-fallback, and CC escalation
+    on exhaustion.
+
+    system_extra: optional skill body appended to SYSTEM for this run only.
+    chat_id: if provided, rolling history is loaded before and saved after.
+    allow_shell: when False, run_shell is withheld from the tool set (email path
+        — untrusted remote input). delegate_to_cc stays.
+    """
+    try:
+        _ensure_ollama()
+    except Exception as e:  # noqa: BLE001
+        return f"[cloud] could not start ollama: {e}"
+
+    mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
+    system = SYSTEM + mem_block
+    if system_extra:
+        system = f"{system}\n\n--- skill ---\n{system_extra}"
+
+    with _history_lock:
+        stored = list(_history.get(str(chat_id), [])) if chat_id is not None else []
+    messages = [{"role": "system", "content": system}]
+    messages += [{"role": m["role"], "content": m["content"]} for m in stored]
+    messages.append({"role": "user", "content": f"[{_tz_stamp()}]\n{text}"})
+
+    tools = _cloud_tools(allow_shell)
+
+    for idx, model in enumerate(CLOUD_CHAIN):
+        try:
+            reply = _cloud_tool_loop(model, messages, tools)
+        except CloudCallError as e:
+            print(f"[cloud] {model} failed: {e.reason} ({e.status})")
+            if idx < len(CLOUD_CHAIN) - 1:
+                continue
+            break
+        # Success — a fallback model served (idx > 0): announce the fallback.
+        if idx > 0:
+            notify_telegram(f"cloud fallback: {CLOUD_CHAIN[idx - 1]} failed → {model}")
+        # Save history and return.
+        if chat_id is not None:
+            key = str(chat_id)
+            with _history_lock:
+                existing = _history.get(key, [])
+                merged = existing + [
+                    {"role": "user", "content": text},
+                    {"role": "assistant", "content": reply},
+                ]
+                _history[key] = merged[-(HISTORY_MAX_TURNS * 2):]
+                _history_updated[key] = time.time()
+            save_history(key)
+        return reply
+
+    # Chain exhausted — urgent notify + auto-escalate to Claude Code.
+    notify_telegram(f"cloud tier exhausted: {' → '.join(CLOUD_CHAIN)}")
+    return ask_cc(text, chat_id=chat_id)
 
 
 def converse_local_ondemand(text, chat_id=None):
