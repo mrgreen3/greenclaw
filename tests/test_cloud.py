@@ -311,6 +311,7 @@ class DocsAndVersionTests(unittest.TestCase):
         txt = (_ROOT / "README.md").read_text()
         self.assertNotIn("GOOGLE_API_KEY", txt)
         self.assertIn("GC_CLOUD_MODEL", txt)
+        self.assertNotIn("Gemini", txt)
 
     def test_version_bumped(self):
         self.assertEqual(gc.__version__, "0.5.0")

@@ -127,7 +127,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 
 **Subscription over metered for heavy work**: For tasks that need a capable model, GreenClaw delegates to Claude Code using an OAuth session tied to a flat-rate Pro subscription. The cost is fixed regardless of usage — no incentive to minimise tokens at the expense of quality, and no surprise bills from heavy use.
 
-**No metered API path**: GreenClaw has no Anthropic API key dependency. There is no paid-per-token path, no spend guards needed, no surprise bills. If something routes to Claude Code and it fails, it fails cleanly — it doesn't fall back to a billing path.
+**No Anthropic API key path**: Claude Code runs via an OAuth Pro session, not a metered Anthropic API key — no per-token spend on the heavy-work path, no surprise bills from CC usage. The lightweight cloud tier (`glm-5.2:cloud`) is metered via Ollama Cloud; cost there is bounded by the small-model routing.
 
 **Nothing runs on a timer**: GreenClaw never wakes the cloud model on a schedule. There's no background polling of your inbox, no cron job quietly burning through your subscription while you sleep. Claude Code runs only when a message — or a skill you triggered — actually needs it. Want your mail summarised? Ask (`/mail`), and it happens then, not every hour whether you're looking or not.
 
