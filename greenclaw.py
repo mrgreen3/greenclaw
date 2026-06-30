@@ -27,7 +27,7 @@ LAN / sole-user box. Secrets in .env (TELEGRAM_*).
 Deps: pip install httpx
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 import importlib.util
 import json

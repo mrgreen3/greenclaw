@@ -149,7 +149,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 ### Requirements
 
 - Python 3.11+
-- A Google AI Studio API key (free — [aistudio.google.com](https://aistudio.google.com))
+- Ollama installed and signed into Cloud (`ollama` → sign in to ollama.com); `glm-5.2:cloud` and `kimi-k2.7-code:cloud` resolvable
 - Claude Code CLI installed and logged in (`claude login`)
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
 
@@ -168,7 +168,8 @@ cp .env.example .env   # fill in your keys
 ```
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...   # your Telegram user ID — locks the bot to you only
-GOOGLE_API_KEY=...     # Google AI Studio key for Gemini
+GC_CLOUD_MODEL=glm-5.2:cloud       # primary cloud model
+GC_CLOUD_FALLBACK=kimi-k2.7-code:cloud  # secondary; auto-escalates to CC if both fail
 ```
 
 To find your chat ID: leave `TELEGRAM_CHAT_ID` blank, start the bot, message it — it will report your ID. Set it and restart.
