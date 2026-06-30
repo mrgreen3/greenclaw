@@ -88,6 +88,7 @@ HISTORY_TTL_DAYS = 7  # discard entries older than this on load
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_IDLE_TIMEOUT = 600  # seconds before auto-shutdown after last use
+CLOUD_SEMAPHORE = threading.Semaphore(3)  # Ollama Cloud: 3 concurrent models
 
 
 def _tz_stamp():
@@ -596,6 +597,50 @@ def _ensure_ollama():
         _ollama_timer = threading.Timer(OLLAMA_IDLE_TIMEOUT, _shutdown_ollama)
         _ollama_timer.daemon = True
         _ollama_timer.start()
+
+
+class CloudCallError(Exception):
+    """Hard failure from a cloud model call (transport or non-2xx)."""
+    def __init__(self, reason, status=None):
+        super().__init__(f"{reason}:{status}")
+        self.reason = reason
+        self.status = status
+
+
+def call_cloud_model(model, messages, tools):
+    """One Ollama /api/chat call to a cloud model. Returns (content, tool_calls).
+
+    tool_calls are normalized to [{"name": str, "arguments": dict}].
+    Raises CloudCallError("http", status) on non-2xx, CloudCallError("transport")
+    on connection/timeout/EOF. A 2xx reply with no content and no tool calls is
+    a valid empty reply, not an error. num_ctx is raised to mitigate the known
+    cloud tool-call parsing/truncation issue on large contexts.
+    """
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "stream": False,
+        "options": {"num_ctx": 40960},
+    }
+    try:
+        with CLOUD_SEMAPHORE:
+            r = httpx.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
+    except Exception as e:  # noqa: BLE001
+        raise CloudCallError("transport", None) from e
+    if r.status_code < 200 or r.status_code >= 300:
+        raise CloudCallError("http", r.status_code)
+    try:
+        msg = r.json().get("message", {})
+    except Exception as e:  # noqa: BLE001
+        raise CloudCallError("transport", None) from e
+    content = (msg.get("content") or "").strip()
+    raw_calls = msg.get("tool_calls") or []
+    tool_calls = []
+    for tc in raw_calls:
+        fn = tc.get("function") or tc
+        tool_calls.append({"name": fn.get("name", ""), "arguments": fn.get("arguments") or {}})
+    return content, tool_calls
 
 
 def converse_local_ondemand(text, chat_id=None):
