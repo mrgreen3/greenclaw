@@ -8,7 +8,7 @@ Two front ends, one core:
 Per-message channels:
   <prompt>               -> Claude Code (default)
   cc <prompt>            -> Claude Code CLI (explicit)
-  gg <prompt>            -> Gemini 2.5 Flash (force)
+  gg <prompt>            -> cloud model (glm-5.2:cloud, force)
   /<trigger> ...         -> a skill recipe from skills/
   /watch                 -> show scheduled jobs and when they last ran
   usage / calls          -> CC invocation count today
@@ -40,10 +40,6 @@ import time
 from datetime import datetime
 
 import httpx
-
-# Gemini channel: Google AI Studio REST API.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_MAX_STEPS = 8
 
 # Cap run_shell output so a chatty command can't blow the local context or Telegram.
 SHELL_MAX_OUTPUT = 6000  # chars
@@ -252,7 +248,7 @@ def log_heartbeat():
 
 
 def _build_system():
-    """Build the Gemini system prompt from real runtime facts gathered once at startup."""
+    """Build the cloud model system prompt from real runtime facts gathered once at startup."""
     try:
         raw = subprocess.check_output(
             "grep PRETTY_NAME /etc/os-release", shell=True, text=True
@@ -270,7 +266,7 @@ def _build_system():
         tools = "standard Linux tools"
     return (
         f"You are the first responder on the user's home server ({os_name}). "
-        "You are a small local model: handle simple things yourself and be honest about your limits. "
+        "You are the first-responder cloud model: handle simple things yourself and be honest about your limits. "
         "Use run_shell to inspect the box or run commands. "
         "Delegate to Claude Code via delegate_to_cc WHENEVER a request needs reach you "
         "don't have — email/Gmail, the web, GitHub, calendar, APIs, or any multi-step or "
@@ -766,7 +762,7 @@ def converse_cloud(text, system_extra=None, chat_id=None, allow_shell=True):
 
 def converse_local_ondemand(text, chat_id=None):
     """Fallback inference via local Qwen (Ollama). Starts Ollama on demand.
-    Loads/saves per-chat rolling history like ask_cc and converse_gemini."""
+    Loads/saves per-chat rolling history like ask_cc and converse_cloud."""
     try:
         _ensure_ollama()
     except Exception as e:
@@ -867,125 +863,6 @@ def dispatch_tool(name, inp):
         err = send_email(inp.get("subject", ""), inp.get("body", ""), inp.get("attachment_path"))
         return err or "email sent"
     return f"[error] unknown tool {name}"
-
-
-def _gemini_tools(allow_shell=True):
-    """Build the Gemini functionDeclarations list.
-
-    When allow_shell is False (the email path, where message bodies are
-    untrusted remote input), run_shell is withheld so a crafted body can't
-    steer the small model into running shell directly. delegate_to_cc is
-    still exposed — the real gate there is sender verification in the task.
-    """
-    tools = [t for t in TOOLS if not (t["name"] == "run_shell" and not allow_shell)]
-    decls = [
-        {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}
-        for t in tools
-    ]
-    decls.append({
-        "name": "delegate_to_cc",
-        "description": (
-            "Delegate to Claude Code when you cannot handle a task yourself — "
-            "e.g. checking email/Gmail, searching the web, or anything requiring "
-            "external access you don't have. Returns Claude Code's reply."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
-            "required": ["query"],
-        },
-    })
-    return [{"functionDeclarations": decls}]
-
-
-def converse_gemini(text, system_extra=None, chat_id=None, allow_shell=True):
-    """Route to Gemini 2.5 Flash with tool-calling loop, history, and CC delegation.
-
-    system_extra: optional skill body appended to SYSTEM for this run only.
-    chat_id: if provided, rolling history is loaded before and saved after.
-    allow_shell: when False, run_shell is withheld from the tool set (use for
-        untrusted input paths like email, so a crafted body can't drive shell).
-    """
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
-    if not api_key:
-        return "[gemini] GOOGLE_API_KEY not set in .env"
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent"
-    )
-    # Key in a header, not the URL query string — keeps it out of proxy/access logs.
-    headers = {"x-goog-api-key": api_key}
-    mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
-    system = SYSTEM + mem_block
-    if system_extra:
-        system = f"{system}\n\n--- skill ---\n{system_extra}"
-
-    # Build contents from history (translate stored {role,content} → Gemini format).
-    with _history_lock:
-        stored = list(_history.get(str(chat_id), [])) if chat_id is not None else []
-    contents = []
-    for m in stored:
-        g_role = "model" if m["role"] == "assistant" else "user"
-        contents.append({"role": g_role, "parts": [{"text": m["content"]}]})
-    contents.append({"role": "user", "parts": [{"text": text}]})
-
-    text_parts = []
-    for _ in range(GEMINI_MAX_STEPS):
-        payload = {
-            "systemInstruction": {"parts": [{"text": system}]},
-            "contents": contents,
-            "tools": _gemini_tools(allow_shell),
-        }
-        try:
-            r = httpx.post(url, json=payload, headers=headers, timeout=120)
-            r.raise_for_status()
-            candidates = r.json().get("candidates", [])
-            if not candidates:
-                return "[gemini] no response"
-            parts = candidates[0]["content"]["parts"]
-        except Exception as e:  # noqa: BLE001
-            return f"[gemini error] {e}"
-
-        # Collect any text parts from this turn.
-        for p in parts:
-            if "text" in p and p["text"].strip():
-                text_parts.append(p["text"].strip())
-
-        # Find function calls.
-        fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
-        if not fn_calls:
-            break
-
-        # Append model turn, then dispatch each tool and append results.
-        contents.append({"role": "model", "parts": parts})
-        tool_results = []
-        for fc in fn_calls:
-            fn = fc.get("name", "")
-            args = fc.get("args") or {}
-            preview = args.get("command") or args.get("query") or args.get("text") or ""
-            print(f"  [g:{fn}] {preview[:120]}")
-            result = dispatch_tool(fn, args)
-            tool_results.append({
-                "functionResponse": {
-                    "name": fn,
-                    "response": {"output": result},
-                }
-            })
-        contents.append({"role": "user", "parts": tool_results})
-
-    reply = "\n".join(text_parts).strip() or "(no reply)"
-    if chat_id is not None:
-        key = str(chat_id)
-        with _history_lock:
-            existing = _history.get(key, [])
-            merged = existing + [
-                {"role": "user", "content": text},
-                {"role": "assistant", "content": reply},
-            ]
-            _history[key] = merged[-(HISTORY_MAX_TURNS * 2):]
-            _history_updated[key] = time.time()
-        save_history(key)
-    return reply
 
 
 def parse_front_matter(text):
@@ -1322,7 +1199,7 @@ def _run_schedule(sched):
                 original = f.read()
             _, body = parse_front_matter(original)
             augmented_body = f"{body}\n\nAdditional instruction: {note}"
-            return converse_gemini("Run this skill now.", system_extra=augmented_body)
+            return converse_cloud("Run this skill now.", system_extra=augmented_body)
         return run_skill(skill, "")
     elif note:
         return route(note)
@@ -1392,7 +1269,7 @@ def run_skill(skill, text):
         return f"[skill error] could not read {skill['path']}: {e}"
     prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
     if skill.get("exposes") == "gg":
-        return converse_gemini(prompt)
+        return converse_cloud(prompt)
     return ask_cc(prompt)
 
 
@@ -1401,7 +1278,7 @@ def route(text, chat_id=None):
 
     CC-first: with no prefix, Claude Code handles it; if CC errors, the local
     Qwen model is used as a fallback. `cc ` forces Claude Code; `gg ` forces
-    Gemini 2.5 Flash. chat_id is passed through for per-chat history tracking.
+    the cloud model. chat_id is passed through for per-chat history tracking.
     """
     # Email messages arrive as "[email subject: ...]\n{body}" — strip the header
     # for prefix routing but keep it for inference context.
@@ -1443,12 +1320,12 @@ def route(text, chat_id=None):
     if text_lower.startswith("cc "):
         return ask_cc(prefix_text[3:].strip())
     if text_lower.startswith("gg "):
-        return converse_gemini(prefix_text[3:].strip(), chat_id=chat_id)
+        return converse_cloud(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
         # Email bodies are untrusted remote input — withhold run_shell from the
         # tool set. delegate_to_cc stays (the owner emailing in wants CC reach);
         # the sender gate in tasks/email.py is the primary trust boundary.
-        return converse_gemini(text, chat_id=chat_id, allow_shell=False)
+        return converse_cloud(text, chat_id=chat_id, allow_shell=False)
     result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
     if result.startswith("[error]"):
         print(f"[route] CC failed ({result}), falling back to Qwen")
@@ -1533,8 +1410,8 @@ def keepalive(threads):
 
 
 def run_terminal():
-    print("router ready — Gemini handles messages and calls Claude Code when needed. "
-          "Prefix `cc ` to force Claude Code, `gg ` to force Gemini. Ctrl-D to quit.\n")
+    print("router ready — the cloud model handles messages and calls Claude Code when needed. "
+          "Prefix `cc ` to force Claude Code, `gg ` to force the cloud model. Ctrl-D to quit.\n")
     while True:
         try:
             user = input("> ").strip()

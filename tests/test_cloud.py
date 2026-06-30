@@ -241,5 +241,60 @@ class ConverseCloudTests(unittest.TestCase):
         self.assertEqual(roles, ["user", "assistant"])
 
 
+class NoGeminiReferencesTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = {
+            "_ensure_ollama": gc._ensure_ollama,
+            "_memory_context": gc._memory_context,
+            "call_cloud_model": gc.call_cloud_model,
+            "notify_telegram": gc.notify_telegram,
+        }
+        self._saved_history = dict(gc._history)
+
+    def tearDown(self):
+        gc._ensure_ollama = self._saved["_ensure_ollama"]
+        gc._memory_context = self._saved["_memory_context"]
+        gc.call_cloud_model = self._saved["call_cloud_model"]
+        gc.notify_telegram = self._saved["notify_telegram"]
+        gc._history.clear()
+        gc._history.update(self._saved_history)
+
+    def test_no_gemini_symbols_in_source(self):
+        src = (_ROOT / "greenclaw.py").read_text()
+        for needle in ["converse_gemini", "_gemini_tools", "GEMINI_MODEL",
+                        "GEMINI_MAX_STEPS", "GOOGLE_API_KEY", "generativelanguage.googleapis.com"]:
+            self.assertNotIn(needle, src, f"found leftover Gemini ref: {needle}")
+
+    def test_route_email_uses_cloud_without_shell(self):
+        gc._ensure_ollama = lambda: None
+        gc._memory_context = ""
+        gc._history.clear()
+        gc.notify_telegram = lambda t: None
+        seen = {}
+        def spy(model, messages, tools):
+            seen["tools"] = tools
+            return ("email ok", [])
+        gc.call_cloud_model = spy
+        out = gc.route("[email subject: hi]\nplease summarize", chat_id="3")
+        self.assertEqual(out, "email ok")
+        names = sorted(t["function"]["name"] for t in seen["tools"])
+        self.assertNotIn("run_shell", names)
+
+    def test_route_gg_uses_cloud_with_shell(self):
+        gc._ensure_ollama = lambda: None
+        gc._memory_context = ""
+        gc._history.clear()
+        gc.notify_telegram = lambda t: None
+        seen = {}
+        def spy(model, messages, tools):
+            seen["tools"] = tools
+            return ("gg ok", [])
+        gc.call_cloud_model = spy
+        out = gc.route("gg do thing", chat_id="3")
+        self.assertEqual(out, "gg ok")
+        names = sorted(t["function"]["name"] for t in seen["tools"])
+        self.assertIn("run_shell", names)
+
+
 if __name__ == "__main__":
     unittest.main()
