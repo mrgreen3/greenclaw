@@ -90,6 +90,15 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_IDLE_TIMEOUT = 600  # seconds before auto-shutdown after last use
 
 
+def _tz_stamp():
+    """Local date/time with the real UTC offset — no hardcoded GMT+1."""
+    now = datetime.now()
+    off = time.localtime().tm_gmtoff
+    sign = "+" if off >= 0 else "-"
+    hh = abs(off) // 3600
+    return now.strftime("%Y-%m-%d %H:%M ") + f"UTC{sign}{hh:.0f}"
+
+
 def load_history():
     global _history, _history_updated
     if not os.path.exists(HISTORY_FILE):
@@ -212,6 +221,20 @@ def _check_memory_threshold():
     reload_memory()
 
 
+def _prune_file(path, keep):
+    """Trim a line-delimited file to its last `keep` lines (atomic)."""
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+        if len(lines) > keep:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines[-keep:])
+            os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def log_heartbeat():
     os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True)
     try:
@@ -220,6 +243,7 @@ def log_heartbeat():
             f.write(json.dumps(rec) + "\n")
     except Exception as e:
         print(f"[heartbeat] {e}")
+    _prune_file(HEARTBEAT_FILE, 1000)
 
 
 def _build_system():
@@ -325,8 +349,9 @@ TOOLS = [
     {
         "name": "send_email",
         "description": (
-            "Send an email to the user (mr.k.clarke@gmail.com). Optionally attach a local file. "
-            "Use for sharing files, images, or any content better delivered by email than chat."
+            "Send an email to the user (the first address in EMAIL_TRUSTED_SENDERS). "
+            "Optionally attach a local file. Use for sharing files, images, or any "
+            "content better delivered by email than chat."
         ),
         "input_schema": {
             "type": "object",
@@ -351,6 +376,12 @@ def load_env(path=".env"):
                 continue
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    # Warn if the secrets file is readable beyond the owner.
+    try:
+        if os.stat(path).st_mode & 0o077:
+            print(f"[env] warning: {path} is group/world-readable (chmod 600 recommended)")
+    except OSError:
+        pass
 
 
 def _truncate(text, limit=SHELL_MAX_OUTPUT):
@@ -407,15 +438,21 @@ def list_notes(limit=40):
 
 
 def save_memory(fact):
-    """Write a memory note to the greenbrain vault directly."""
+    """Write a memory note. Prefers the greenbrain vault (skills/vault) if
+    present; otherwise appends to the notes file so the command still works
+    out-of-tree — skills/ is gitignored and owner-provided, so the vault
+    module is not guaranteed to exist on a fresh clone."""
+    if ":" in fact[:40]:
+        topic, content = fact.split(":", 1)
+    else:
+        topic, content = "notes", fact
+    topic, content = topic.strip(), content.strip()
     try:
         from skills.vault import write_note
-        # Try to split "topic: content" if the fact contains a colon early on
-        if ":" in fact[:40]:
-            topic, content = fact.split(":", 1)
-        else:
-            topic, content = "notes", fact
-        return write_note(topic.strip(), content.strip())
+        return write_note(topic, content)
+    except ImportError:
+        # No vault module shipped — degrade to a timestamped note.
+        return add_note(f"[memory:{topic}] {content}")
     except Exception as e:  # noqa: BLE001
         return f"[memory] {e}"
 
@@ -436,6 +473,31 @@ def get_daily_cc_calls():
     return count
 
 
+def _prune_cc_log(max_days=14):
+    """Drop CC call log entries older than max_days (atomic). Low volume, so
+    a full read/rewrite per call is fine."""
+    try:
+        if not os.path.exists(CC_LOG_FILE):
+            return
+        with open(CC_LOG_FILE) as f:
+            lines = f.readlines()
+        cutoff = time.time() - max_days * 86400
+        kept = []
+        for line in lines:
+            try:
+                if datetime.fromisoformat(json.loads(line).get("ts", "")).timestamp() >= cutoff:
+                    kept.append(line)
+            except Exception:  # noqa: BLE001
+                kept.append(line)  # keep unparseable lines rather than lose them
+        if len(kept) < len(lines):
+            tmp = CC_LOG_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(kept)
+            os.replace(tmp, CC_LOG_FILE)
+    except Exception as e:  # noqa: BLE001
+        print(f"[cc log prune error] {e}")
+
+
 def log_cc_call(prompt_preview):
     try:
         rec = {
@@ -446,6 +508,7 @@ def log_cc_call(prompt_preview):
             f.write(json.dumps(rec) + "\n")
     except Exception as e:  # noqa: BLE001
         print(f"[cc log error] {e}")
+    _prune_cc_log()
 
 
 def report_usage():
@@ -536,23 +599,39 @@ def _ensure_ollama():
 
 
 def converse_local_ondemand(text, chat_id=None):
-    """Fallback inference via local Qwen (Ollama). Starts Ollama on demand."""
+    """Fallback inference via local Qwen (Ollama). Starts Ollama on demand.
+    Loads/saves per-chat rolling history like ask_cc and converse_gemini."""
     try:
         _ensure_ollama()
     except Exception as e:
         return f"[qwen] could not start ollama: {e}"
-    now = datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
     mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
-    messages = [{"role": "user", "content": f"[{now} GMT+1]{mem_block}\n\n{text}"}]
+    prefix = f"[{_tz_stamp()}]{mem_block}\n\n"
+    with _history_lock:
+        stored = list(_history.get(str(chat_id), [])) if chat_id is not None else []
+    messages = [{"role": m["role"], "content": m["content"]} for m in stored]
+    messages.append({"role": "user", "content": prefix + text})
     try:
         r = httpx.post(
             f"{OLLAMA_URL}/api/chat",
             json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
             timeout=120,
         )
-        return r.json()["message"]["content"].strip()
+        reply = r.json()["message"]["content"].strip()
     except Exception as e:
         return f"[qwen] {e}"
+    if chat_id is not None:
+        key = str(chat_id)
+        with _history_lock:
+            existing = _history.get(key, [])
+            merged = existing + [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": reply},
+            ]
+            _history[key] = merged[-(HISTORY_MAX_TURNS * 2):]
+            _history_updated[key] = time.time()
+        save_history(key)
+    return reply
 
 
 def ask_cc(prompt, chat_id=None):
@@ -561,7 +640,7 @@ def ask_cc(prompt, chat_id=None):
         return "[error] claude CLI not found"
 
     original_prompt = prompt
-    now = datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
+    now = _tz_stamp()
     mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
 
     hist_block = ""
@@ -575,7 +654,7 @@ def ask_cc(prompt, chat_id=None):
                 lines.append(f"{role}: {msg['content']}")
             hist_block = "\n\n--- recent conversation ---\n" + "\n".join(lines)
 
-    prompt = f"[Current date/time: {now} GMT+1]{mem_block}{hist_block}\n\n{prompt}"
+    prompt = f"[Current date/time: {now}]{mem_block}{hist_block}\n\n{prompt}"
     log_cc_call(original_prompt)  # log the user's actual request, not the augmented prompt
     print("  [-> Claude Code]")
     try:
@@ -624,37 +703,52 @@ def dispatch_tool(name, inp):
     return f"[error] unknown tool {name}"
 
 
-_GEMINI_TOOLS = [{"functionDeclarations": [
-    {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}
-    for t in TOOLS
-] + [{
-    "name": "delegate_to_cc",
-    "description": (
-        "Delegate to Claude Code when you cannot handle a task yourself — "
-        "e.g. checking email/Gmail, searching the web, or anything requiring "
-        "external access you don't have. Returns Claude Code's reply."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
-        "required": ["query"],
-    },
-}]}]
+def _gemini_tools(allow_shell=True):
+    """Build the Gemini functionDeclarations list.
+
+    When allow_shell is False (the email path, where message bodies are
+    untrusted remote input), run_shell is withheld so a crafted body can't
+    steer the small model into running shell directly. delegate_to_cc is
+    still exposed — the real gate there is sender verification in the task.
+    """
+    tools = [t for t in TOOLS if not (t["name"] == "run_shell" and not allow_shell)]
+    decls = [
+        {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}
+        for t in tools
+    ]
+    decls.append({
+        "name": "delegate_to_cc",
+        "description": (
+            "Delegate to Claude Code when you cannot handle a task yourself — "
+            "e.g. checking email/Gmail, searching the web, or anything requiring "
+            "external access you don't have. Returns Claude Code's reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
+            "required": ["query"],
+        },
+    })
+    return [{"functionDeclarations": decls}]
 
 
-def converse_gemini(text, system_extra=None, chat_id=None):
+def converse_gemini(text, system_extra=None, chat_id=None, allow_shell=True):
     """Route to Gemini 2.5 Flash with tool-calling loop, history, and CC delegation.
 
     system_extra: optional skill body appended to SYSTEM for this run only.
     chat_id: if provided, rolling history is loaded before and saved after.
+    allow_shell: when False, run_shell is withheld from the tool set (use for
+        untrusted input paths like email, so a crafted body can't drive shell).
     """
     api_key = os.environ.get("GOOGLE_API_KEY", "")
     if not api_key:
         return "[gemini] GOOGLE_API_KEY not set in .env"
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={api_key}"
+        f"{GEMINI_MODEL}:generateContent"
     )
+    # Key in a header, not the URL query string — keeps it out of proxy/access logs.
+    headers = {"x-goog-api-key": api_key}
     mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
     system = SYSTEM + mem_block
     if system_extra:
@@ -674,10 +768,10 @@ def converse_gemini(text, system_extra=None, chat_id=None):
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": contents,
-            "tools": _GEMINI_TOOLS,
+            "tools": _gemini_tools(allow_shell),
         }
         try:
-            r = httpx.post(url, json=payload, timeout=120)
+            r = httpx.post(url, json=payload, headers=headers, timeout=120)
             r.raise_for_status()
             candidates = r.json().get("candidates", [])
             if not candidates:
@@ -937,6 +1031,7 @@ def load_schedules():
             "days": days,
             "skill": skill_name,
             "note": note,
+            "output": meta.get("output", "").strip().lower(),
             "path": path,
         })
         print(f"[scheduler] loaded: {name} @ {hour:02d}:{minute:02d} days={days_raw} skill={skill_name or '—'}")
@@ -1119,9 +1214,9 @@ def run_skill(skill, text):
 def route(text, chat_id=None):
     """Shared routing logic for every front end (terminal and all tasks).
 
-    Qwen-first: with no prefix, the local model handles it and delegates to Claude
-    Code itself when it needs more reach. `cc ` forces Claude Code; `gc ` forces local.
-    chat_id: passed through to converse_local for per-chat history tracking.
+    CC-first: with no prefix, Claude Code handles it; if CC errors, the local
+    Qwen model is used as a fallback. `cc ` forces Claude Code; `gg ` forces
+    Gemini 2.5 Flash. chat_id is passed through for per-chat history tracking.
     """
     # Email messages arrive as "[email subject: ...]\n{body}" — strip the header
     # for prefix routing but keep it for inference context.
@@ -1165,7 +1260,10 @@ def route(text, chat_id=None):
     if text_lower.startswith("gg "):
         return converse_gemini(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
-        return converse_gemini(text, chat_id=chat_id)  # email default: Gemini tool loop
+        # Email bodies are untrusted remote input — withhold run_shell from the
+        # tool set. delegate_to_cc stays (the owner emailing in wants CC reach);
+        # the sender gate in tasks/email.py is the primary trust boundary.
+        return converse_gemini(text, chat_id=chat_id, allow_shell=False)
     result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
     if result.startswith("[error]"):
         print(f"[route] CC failed ({result}), falling back to Qwen")
@@ -1277,6 +1375,7 @@ def main():
     load_history()
     load_skills()
     reload_memory()
+    _check_memory_threshold()
     log_heartbeat()
     threads = start_tasks()
     if sys.stdin.isatty():

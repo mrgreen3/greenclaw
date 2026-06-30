@@ -6,7 +6,10 @@ open GitHub issues, scheduled jobs, and recent notes.
 
 Configuration (in .env):
   DASHBOARD_PORT   TCP port to listen on (default: 7070)
-  DASHBOARD_HOST   Bind address (default: 0.0.0.0 — LAN-accessible)
+  DASHBOARD_HOST   Bind address (default: 127.0.0.1 — localhost only; set
+                   0.0.0.0 only behind a firewall/Tailscale)
+  DASHBOARD_TOKEN  Optional bearer token; if set, the page (which shows CC
+                   prompts, notes, memory filenames) requires it to load
   GITHUB_TOKEN     Optional — raises the GitHub API rate limit to 5000/hr
 
 This file follows the tasks/*.py contract: it defines start(on_message)
@@ -24,6 +27,7 @@ import urllib.request
 from datetime import datetime
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
 # ---------------------------------------------------------------------------
 # Paths (mirrors greenclaw.py)
@@ -42,6 +46,11 @@ STATIC_DIR = os.path.join(_HERE, "static")
 MEMORY_SIZE_THRESHOLD = 50_000
 
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "mrgreen3/greenclaw")
+
+# Optional bearer token. When set, the page requires Authorization: Bearer
+# <token> or ?token=<token> — the page exposes CC prompts, notes, and memory
+# filenames, so leave this unset only if bound to localhost.
+DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
 
 # greenclaw.py version, read once at import for the footer.
 try:
@@ -675,7 +684,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         pass  # silence access log
 
     def do_GET(self):
-        if self.path not in ("/", "/dashboard"):
+        parsed = urlparse(self.path)
+        # Token gate (optional). When set, require a bearer token so the page
+        # (which shows CC prompts, notes, memory filenames) isn't exposed.
+        if DASHBOARD_TOKEN:
+            auth = self.headers.get("Authorization", "")
+            qtok = (parse_qs(parsed.query).get("token") or [""])[0]
+            if auth != f"Bearer {DASHBOARD_TOKEN}" and qtok != DASHBOARD_TOKEN:
+                self.send_response(401)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"unauthorized")
+                return
+        if parsed.path not in ("/", "/dashboard"):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"not found")
@@ -716,7 +737,7 @@ def start(on_message):
         print("[dashboard] disabled via DASHBOARD_ENABLED — not starting")
         return
     port = int(os.environ.get("DASHBOARD_PORT", 7070))
-    host = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
     HTTPServer.allow_reuse_address = True
     server = HTTPServer((host, port), DashboardHandler)
     print(f"[dashboard] listening on http://{host}:{port}/dashboard")
