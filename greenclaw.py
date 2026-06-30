@@ -643,6 +643,39 @@ def call_cloud_model(model, messages, tools):
     return content, tool_calls
 
 
+def _cloud_tools(allow_shell=True):
+    """Build Ollama-format tool definitions from TOOLS plus delegate_to_cc.
+
+    When allow_shell is False (the email path, where message bodies are
+    untrusted remote input), run_shell is withheld so a crafted body can't
+    steer the cloud model into running shell directly. delegate_to_cc stays —
+    the sender gate in tasks/email.py is the primary trust boundary there.
+    """
+    tools = [t for t in TOOLS if not (t["name"] == "run_shell" and not allow_shell)]
+    out = [
+        {"type": "function",
+         "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+        for t in tools
+    ]
+    out.append({
+        "type": "function",
+        "function": {
+            "name": "delegate_to_cc",
+            "description": (
+                "Delegate to Claude Code when you cannot handle a task yourself — "
+                "e.g. checking email/Gmail, searching the web, or anything requiring "
+                "external access you don't have. Returns Claude Code's reply."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
+                "required": ["query"],
+            },
+        },
+    })
+    return out
+
+
 def converse_local_ondemand(text, chat_id=None):
     """Fallback inference via local Qwen (Ollama). Starts Ollama on demand.
     Loads/saves per-chat rolling history like ask_cc and converse_gemini."""

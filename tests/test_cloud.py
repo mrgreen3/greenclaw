@@ -105,5 +105,29 @@ class CallCloudModelTests(unittest.TestCase):
         self.assertEqual(payload["options"]["num_ctx"], 40960)
 
 
+class CloudToolsTests(unittest.TestCase):
+    def _names(self, tools):
+        return sorted(t["function"]["name"] for t in tools)
+
+    def test_full_tools_include_run_shell_and_delegate(self):
+        names = self._names(gc._cloud_tools(allow_shell=True))
+        self.assertIn("run_shell", names)
+        self.assertIn("delegate_to_cc", names)
+        self.assertIn("add_note", names)
+
+    def test_no_shell_withholds_run_shell_only(self):
+        names = self._names(gc._cloud_tools(allow_shell=False))
+        self.assertNotIn("run_shell", names)
+        self.assertIn("delegate_to_cc", names)
+        self.assertIn("add_note", names)
+
+    def test_ollama_shape(self):
+        tools = gc._cloud_tools(allow_shell=True)
+        for t in tools:
+            self.assertEqual(t["type"], "function")
+            self.assertIn("name", t["function"])
+            self.assertIn("parameters", t["function"])
+
+
 if __name__ == "__main__":
     unittest.main()
