@@ -1,6 +1,6 @@
 Prefixes:
   cc <prompt>   force Claude Code (email, web, GitHub, full reach)
-  gg <prompt>   force Gemini 2.5 Flash (free tier, tool loop)
+  gg <prompt>   force cloud model (glm-5.2:cloud, tool loop)
   (no prefix)   Claude Code; falls back to local Qwen if CC errors
 
 Commands:

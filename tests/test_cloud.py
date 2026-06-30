@@ -296,5 +296,25 @@ class NoGeminiReferencesTests(unittest.TestCase):
         self.assertIn("run_shell", names)
 
 
+class DocsAndVersionTests(unittest.TestCase):
+    def test_env_example_has_cloud_vars_no_gemini(self):
+        txt = (_ROOT / ".env.example").read_text()
+        self.assertIn("GC_CLOUD_MODEL=", txt)
+        self.assertIn("GC_CLOUD_FALLBACK=", txt)
+        self.assertNotIn("GOOGLE_API_KEY", txt)
+
+    def test_cheat_sheet_no_gemini(self):
+        txt = (_ROOT / "static" / "cheat.md").read_text()
+        self.assertNotIn("Gemini", txt)
+
+    def test_readme_no_gemini_key(self):
+        txt = (_ROOT / "README.md").read_text()
+        self.assertNotIn("GOOGLE_API_KEY", txt)
+        self.assertIn("GC_CLOUD_MODEL", txt)
+
+    def test_version_bumped(self):
+        self.assertEqual(gc.__version__, "0.5.0")
+
+
 if __name__ == "__main__":
     unittest.main()
