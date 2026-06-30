@@ -26,14 +26,14 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 |--------|---------|------|
 | _(anything)_ | Claude Code (default) | Pro subscription (no per-token billing) |
 | `cc <prompt>` | Forces Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
-| `gg <prompt>` | Forces Gemini 2.5 Flash | Free tier (Google AI Studio) |
+| `gg <prompt>` | Forces the cloud model (glm-5.2:cloud) | Ollama Cloud (metered) |
 | `/<trigger> …` | A skill recipe (see [Skills](#skills)) | Free or subscription, per skill |
 | `/cheat` | Built-in cheat sheet — prefixes, commands, loaded skills | — |
 | `usage` / `calls` | CC invocation count today | — |
 
-**Default path** (no prefix) goes straight to Claude Code via your claude.ai Pro OAuth session. For lighter tasks where you want a faster response, use `gg` to route to Gemini 2.5 Flash instead.
+**Default path** (no prefix) goes straight to Claude Code via your claude.ai Pro OAuth session. For lighter tasks where you want a faster response, use `gg` to route to the cloud model (glm-5.2:cloud) instead.
 
-**Force a model** when you want to be explicit: `cc <prompt>` goes straight to Claude Code, `gg <prompt>` routes to Gemini. Gemini runs on Google's free tier — fast for routine tasks like checking system state, running commands, or taking notes.
+**Force a model** when you want to be explicit: `cc <prompt>` goes straight to Claude Code, `gg <prompt>` routes to the cloud model. It runs on Ollama Cloud — fast for routine tasks like checking system state, running commands, or taking notes.
 
 ### Tools available to the AI
 
@@ -48,9 +48,9 @@ Claude Code has full autonomy: web search, file access, GitHub, email, anything 
 ```
 Incoming message (Telegram or other task)
     │
-    ├── /<trigger> …    →  matching skill recipe       →  Gemini or CC, per skill
+    ├── /<trigger> …    →  matching skill recipe       →  cloud model or CC, per skill
     ├── cc <prompt>     →  Claude Code CLI (OAuth/Pro)  →  forced
-    ├── gg <prompt>     →  Gemini 2.5 Flash (tools)    →  forced
+    ├── gg <prompt>     →  cloud model (glm-5.2:cloud, tools)  →  forced
     ├── /cheat          →  built-in cheat sheet         →  no LLM
     ├── usage / calls   →  CC invocation count          →  no LLM
     │
@@ -73,7 +73,7 @@ A skill is a recipe — instructions the assistant follows — not a plugin or a
 ---
 name: system-health
 description: Check disk, memory, load, and the bot service. Use when the user asks how the box is doing.
-exposes: cc             # cc (Claude Code) | gg (Gemini) | both
+exposes: cc             # cc (Claude Code) | gg (cloud model) | both
 trigger: /health        # the command that runs it
 locked: false           # true = must be armed in skills.allow before it runs
 source: owner           # who wrote it — for auditing
@@ -123,7 +123,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 
 **No GPU**: Most personal AI setups assume you need a GPU. GreenClaw doesn't — it routes to the right tool for the job rather than running a large local model constantly.
 
-**Free tier for lightweight work**: Gemini 2.5 Flash handles shell commands, notes, quick lookups, and anything that doesn't need Claude Code's full reach. Google's free tier is generous — no cost for everyday use.
+**Lightweight work**: the cloud model (glm-5.2:cloud) handles shell commands, notes, quick lookups, and anything that doesn't need Claude Code's full reach. It falls back to kimi-k2.7-code:cloud, then Claude Code, if a call fails.
 
 **Subscription over metered for heavy work**: For tasks that need a capable model, GreenClaw delegates to Claude Code using an OAuth session tied to a flat-rate Pro subscription. The cost is fixed regardless of usage — no incentive to minimise tokens at the expense of quality, and no surprise bills from heavy use.
 
@@ -140,7 +140,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 - You want a polished, point-and-click setup
 - You need it to work on Windows or macOS (Linux only, intentionally)
 - You're looking for a hosted service — this runs on your hardware, your network
-- You want everything running locally with no cloud — GreenClaw relies on Claude Code (OAuth) and Gemini (free tier)
+- You want everything running locally with no cloud — GreenClaw relies on Claude Code (OAuth) and the Ollama Cloud tier (glm-5.2:cloud)
 
 ---
 
@@ -243,7 +243,7 @@ Done so far:
 - Per-chat rolling history — the last 10 exchanges per conversation are preserved; context survives within a session (in-memory; cleared on restart — see [#7](https://github.com/mrgreen3/greenclaw/issues/7))
 - Telegram typing indicator — `typing…` sent before dispatching so the chat feels live during longer calls
 - Runtime-aware system prompt — at startup, `_build_system()` reads `/etc/os-release` and probes installed tools via `which`, so the AI knows the actual OS and what's available without being told each time
-- System management via natural language — common sysadmin phrases (`update system`, `disk space`, `what's running`) are handled immediately via `run_shell` without asking for clarification; Gemini knows it's on Arch and uses `pacman`, not `apt`
+- System management via natural language — common sysadmin phrases (`update system`, `disk space`, `what's running`) are handled immediately via `run_shell` without asking for clarification; the cloud model knows it's on Arch and uses `pacman`, not `apt`
 
 ---
 
