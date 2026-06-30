@@ -52,6 +52,8 @@ def _token():
         f = STATE_DIR / "gh_token"
         if f.exists():
             tok = f.read_text().strip()
+            if f.stat().st_mode & 0o077:
+                print(f"[github_inbox] warning: {f} is group/world-readable (chmod 600)")
     if not tok:
         sys.exit(f"No token: set ${TOKEN_ENV} or write {STATE_DIR/'gh_token'} (chmod 600)")
     return tok
@@ -100,6 +102,10 @@ def load_state():
 
 def save_state(state):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # Cap the processed list — closed issues don't reappear in list_commands,
+    # so old entries are dead weight. Keep the 500 most recent.
+    if isinstance(state.get("processed"), list):
+        state["processed"] = sorted(state["processed"])[-500:]
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(STATE_FILE)
@@ -129,12 +135,17 @@ def dispatch_to_cc(command: str) -> str:
     SECURITY: `command` is remote input. Passed to CC as a *prompt*, never to a
     shell. The real guard is ALLOWED_AUTHOR + private repo + scoped PAT.
 
+    Env: ANTHROPIC_API_KEY is stripped so OAuth-authed CC never falls back to
+    the metered API path (mirrors greenclaw.ask_cc). --dangerously-skip-permissions
+    matches ask_cc so issue tasks can actually read/write files and run agents.
+
     SEAM: swap this function's body if you prefer to route into an existing
     Greenclaw dispatch path. Everything else stays the same.
     """
+    cc_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     proc = subprocess.run(
-        ["claude", "-p", command],
-        capture_output=True, text=True, timeout=CC_TIMEOUT, cwd=CC_WORKDIR,
+        ["claude", "-p", command, "--dangerously-skip-permissions"],
+        capture_output=True, text=True, timeout=CC_TIMEOUT, cwd=CC_WORKDIR, env=cc_env,
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "").strip() or f"claude exited {proc.returncode}")

@@ -14,7 +14,7 @@ Config (in .env):
     EMAIL_SMTP_PORT           SMTP port (usually 587)
     EMAIL_ADDRESS             Email address (greenclaw@archbang.org)
     EMAIL_PASSWORD            Email password
-    EMAIL_TRUSTED_SENDERS     Comma-separated list of trusted senders (default: mr.k.clarke@gmail.com)
+    EMAIL_TRUSTED_SENDERS     Comma-separated list of trusted senders (required, no default)
 """
 
 import os
@@ -25,6 +25,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.parser import Parser
+from email.utils import parseaddr
 
 NAME = "email"
 DESCRIPTION = "Email task via IMAP/SMTP"
@@ -37,12 +38,12 @@ def start(on_message):
     smtp_port = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
     email_addr = os.environ.get("EMAIL_ADDRESS", "").strip()
     email_pass = os.environ.get("EMAIL_PASSWORD", "").strip()
-    trusted_senders = os.environ.get("EMAIL_TRUSTED_SENDERS", "mr.k.clarke@gmail.com").strip().split(",")
+    trusted_senders = os.environ.get("EMAIL_TRUSTED_SENDERS", "").strip().split(",")
     trusted_senders = [s.strip().lower() for s in trusted_senders if s.strip()]
 
     if not all([imap_host, smtp_host, email_addr, email_pass, trusted_senders]):
         print("[email] EMAIL_IMAP_HOST, EMAIL_SMTP_HOST, EMAIL_ADDRESS, EMAIL_PASSWORD, "
-              "and EMAIL_TRUSTED_SENDERS (default: mr.k.clarke@gmail.com) required — task not started")
+              "and EMAIL_TRUSTED_SENDERS required — task not started")
         return
 
     print(f"[email] running — listening on {email_addr} (trusted senders: {', '.join(trusted_senders)})")
@@ -69,8 +70,6 @@ def start(on_message):
             print(f"[email] reply sent to {recipient}")
         except Exception as e:  # noqa: BLE001
             print(f"[email send error] {e}")
-
-    last_uid = None  # Track last processed UID to avoid re-processing
 
     while True:
         try:
@@ -108,18 +107,23 @@ def start(on_message):
                     parser = Parser()
                     email_msg = parser.parsestr(msg_bytes.decode("utf-8", errors="ignore"))
 
-                    sender = email_msg.get("From", "").lower()
+                    sender = email_msg.get("From", "")
                     subject = email_msg.get("Subject", "(no subject)").strip()
-                    reply_to = email_msg.get("Reply-To") or sender
+                    reply_to_raw = email_msg.get("Reply-To", "")
 
-                    # Extract sender address (handle "Name <email@example.com>" format)
-                    sender_email = sender.split("<")[-1].rstrip(">") if "<" in sender else sender
+                    # parseaddr handles "Name <addr@x>" and bare addresses.
+                    from_addr = parseaddr(sender)[1].lower()
+                    reply_to_addr = parseaddr(reply_to_raw)[1].lower() if reply_to_raw else from_addr
 
-                    # Check if sender is trusted
-                    if sender_email not in trusted_senders:
-                        print(f"[email] blocked — untrusted sender: {sender_email}")
+                    # Trust is decided on the From address. Reply only to a trusted
+                    # address: if Reply-To points elsewhere, ignore it (defeats a
+                    # foreign-Reply-To exfil). From is a forged header — for real
+                    # sender verification enable DKIM/SPF checking at the MTA.
+                    if from_addr not in trusted_senders:
+                        print(f"[email] blocked — untrusted sender: {from_addr}")
                         mail.store(msg_id, "+FLAGS", "\\Seen")
                         continue
+                    reply_to = reply_to_addr if reply_to_addr in trusted_senders else from_addr
 
                     # Extract body (plain text preferred)
                     body = ""
