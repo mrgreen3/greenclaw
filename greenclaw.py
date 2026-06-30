@@ -986,6 +986,25 @@ def send_email(subject, body, attachment_path=None):
         return f"[email send error] {e}"
 
 
+def notify_telegram(text):
+    """Best-effort Telegram send to the owner's chat. Chunks to 4000 chars.
+    Never raises — a notification failure must not kill the dispatch thread
+    or mask the result it was reporting on."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat:
+        return
+    try:
+        for i in range(0, len(text), 4000):
+            httpx.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat, "text": text[i:i + 4000]},
+                timeout=30,
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"[notify] telegram send error: {e}")
+
+
 # ---------------------------------------------------------------------------
 # SCHEDULER — schedules/*.md define timed jobs; this section owns the watch.
 # ---------------------------------------------------------------------------
@@ -1313,15 +1332,7 @@ def start_tasks():
     _tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
     if _tg_token and _tg_chat:
         def _sched_reply(text):
-            try:
-                for i in range(0, len(text), 4000):
-                    httpx.post(
-                        f"https://api.telegram.org/bot{_tg_token}/sendMessage",
-                        json={"chat_id": _tg_chat, "text": text[i:i + 4000]},
-                        timeout=30,
-                    )
-            except Exception as e:  # noqa: BLE001
-                print(f"[scheduler] telegram send error: {e}")
+            notify_telegram(text)
         start_scheduler(_sched_reply)
     else:
         print("[scheduler] TELEGRAM_BOT_TOKEN/CHAT_ID not set — scheduler outputs to stdout only")
