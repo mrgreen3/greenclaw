@@ -142,8 +142,10 @@ class ConverseCloudTests(unittest.TestCase):
             "dispatch_tool": gc.dispatch_tool,
             "notify_telegram": gc.notify_telegram,
             "ask_cc": gc.ask_cc,
+            "save_history": gc.save_history,
         }
         self._saved_history = dict(gc._history)
+        gc.save_history = lambda key: None
         # Default chain for tests.
         gc.GC_CLOUD_MODEL = "glm-5.2:cloud"
         gc.GC_CLOUD_FALLBACK = "kimi-k2.7-code:cloud"
@@ -248,14 +250,17 @@ class NoGeminiReferencesTests(unittest.TestCase):
             "_memory_context": gc._memory_context,
             "call_cloud_model": gc.call_cloud_model,
             "notify_telegram": gc.notify_telegram,
+            "save_history": gc.save_history,
         }
         self._saved_history = dict(gc._history)
+        gc.save_history = lambda key: None
 
     def tearDown(self):
         gc._ensure_ollama = self._saved["_ensure_ollama"]
         gc._memory_context = self._saved["_memory_context"]
         gc.call_cloud_model = self._saved["call_cloud_model"]
         gc.notify_telegram = self._saved["notify_telegram"]
+        gc.save_history = self._saved["save_history"]
         gc._history.clear()
         gc._history.update(self._saved_history)
 
