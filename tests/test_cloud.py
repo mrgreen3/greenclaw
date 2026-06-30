@@ -52,5 +52,58 @@ class NotifyTelegramTests(unittest.TestCase):
         self.assertEqual(self._posts, [])
 
 
+class CallCloudModelTests(unittest.TestCase):
+    def setUp(self):
+        self._posts = []
+        def fake_post(url, json=None, timeout=None, **kw):
+            self._posts.append({"url": url, "json": json})
+            resp = self._next_response
+            self._next_response = FakeResponse(200, {"message": {"content": "", "tool_calls": []}})
+            if isinstance(resp, Exception):
+                raise resp
+            return resp
+        gc.httpx.post = fake_post
+        self._next_response = FakeResponse(200, {"message": {"content": "", "tool_calls": []}})
+
+    def _ollama_reply(self, content="", tool_calls=None):
+        return FakeResponse(200, {"message": {"content": content, "tool_calls": tool_calls or []}})
+
+    def test_returns_text_and_normalized_tool_calls(self):
+        self._next_response = self._ollama_reply(
+            content="hello",
+            tool_calls=[{"function": {"name": "run_shell", "arguments": {"command": "ls"}}}],
+        )
+        content, tcs = gc.call_cloud_model("glm-5.2:cloud", [{"role": "user", "content": "hi"}], [])
+        self.assertEqual(content, "hello")
+        self.assertEqual(tcs, [{"name": "run_shell", "arguments": {"command": "ls"}}])
+
+    def test_empty_2xx_is_valid_empty_reply(self):
+        self._next_response = self._ollama_reply(content="", tool_calls=[])
+        content, tcs = gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
+        self.assertEqual(content, "")
+        self.assertEqual(tcs, [])
+
+    def test_non_2xx_raises_http_error(self):
+        self._next_response = FakeResponse(502, {})
+        with self.assertRaises(gc.CloudCallError) as cm:
+            gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
+        self.assertEqual(cm.exception.reason, "http")
+        self.assertEqual(cm.exception.status, 502)
+
+    def test_connection_error_raises_transport(self):
+        self._next_response = RuntimeError("connection refused")
+        with self.assertRaises(gc.CloudCallError) as cm:
+            gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
+        self.assertEqual(cm.exception.reason, "transport")
+
+    def test_sends_num_ctx_options(self):
+        self._next_response = self._ollama_reply(content="ok")
+        gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
+        payload = self._posts[0]["json"]
+        self.assertEqual(payload["model"], "m")
+        self.assertFalse(payload["stream"])
+        self.assertEqual(payload["options"]["num_ctx"], 40960)
+
+
 if __name__ == "__main__":
     unittest.main()
