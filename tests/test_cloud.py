@@ -159,7 +159,10 @@ class ConverseCloudTests(unittest.TestCase):
 
         def fake_call(model, messages, tools):
             self.calls.append(model)
-            return self._script.pop(0)
+            item = self._script.pop(0)
+            if isinstance(item, gc.CloudCallError):
+                raise item
+            return item
         gc.call_cloud_model = fake_call
 
         def fake_dispatch(name, args):

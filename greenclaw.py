@@ -690,10 +690,7 @@ def _cloud_tool_loop(model, messages, tools):
     msgs = list(messages)
     text_parts = []
     for _ in range(CLOUD_MAX_STEPS):
-        result = call_cloud_model(model, msgs, tools)
-        if isinstance(result, CloudCallError):
-            raise result
-        content, tool_calls = result
+        content, tool_calls = call_cloud_model(model, msgs, tools)
         if content:
             text_parts.append(content)
         if not tool_calls:
