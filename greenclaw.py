@@ -90,6 +90,7 @@ GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
 GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "kimi-k2.7-code:cloud")
 CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
 CLOUD_MAX_STEPS = 8
+EMAIL_CC_KEYWORD = os.environ.get("EMAIL_CC_KEYWORD", "").strip()
 
 
 def _tz_stamp():
@@ -1375,9 +1376,17 @@ def route(text, chat_id=None):
     if text_lower.startswith("gg "):
         return converse_cloud(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
-        # Email bodies are untrusted remote input — withhold run_shell AND
-        # delegate_to_cc from the tool set (see _cloud_tools docstring: the
-        # From: sender gate is spoofable and isn't a real trust boundary).
+        # Trusted sender already verified in tasks/email.py. If EMAIL_CC_KEYWORD
+        # is set and present in the body, escalate to CC (full autonomy).
+        # Without the keyword, fall back to restricted cloud path (no run_shell,
+        # no delegate_to_cc) — defence against From: header spoofing.
+        if EMAIL_CC_KEYWORD and EMAIL_CC_KEYWORD in text:
+            print("[route] email keyword matched — routing to CC")
+            result = ask_cc(text, chat_id=chat_id)
+            if result.startswith("[error]"):
+                print(f"[route] CC failed ({result}), falling back to glm-5.2")
+                return converse_cloud(text, chat_id=chat_id)
+            return result
         return converse_cloud(text, chat_id=chat_id, allow_shell=False)
     result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
     if result.startswith("[error]"):
