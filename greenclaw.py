@@ -1381,8 +1381,8 @@ def route(text, chat_id=None):
         return converse_cloud(text, chat_id=chat_id, allow_shell=False)
     result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
     if result.startswith("[error]"):
-        print(f"[route] CC failed ({result}), falling back to Qwen")
-        return converse_local_ondemand(text, chat_id=chat_id)
+        print(f"[route] CC failed ({result}), falling back to glm-5.2")
+        return converse_cloud(text, chat_id=chat_id)
     return result
 
 
