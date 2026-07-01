@@ -115,10 +115,14 @@ class CloudToolsTests(unittest.TestCase):
         self.assertIn("delegate_to_cc", names)
         self.assertIn("add_note", names)
 
-    def test_no_shell_withholds_run_shell_only(self):
+    def test_no_shell_withholds_run_shell_and_delegate(self):
+        # delegate_to_cc routes to ask_cc() with --dangerously-skip-permissions
+        # — the same shell-equivalent capability run_shell grants, just one hop
+        # removed. The email From: header isn't a real trust boundary (no
+        # SPF/DKIM), so it must be withheld here too, not just run_shell.
         names = self._names(gc._cloud_tools(allow_shell=False))
         self.assertNotIn("run_shell", names)
-        self.assertIn("delegate_to_cc", names)
+        self.assertNotIn("delegate_to_cc", names)
         self.assertIn("add_note", names)
 
     def test_ollama_shape(self):
@@ -224,7 +228,7 @@ class ConverseCloudTests(unittest.TestCase):
         self.assertEqual(out, "done")
         self.assertEqual(self.dispatched, [("run_shell", {"command": "ls"})])
 
-    def test_email_path_withholds_run_shell(self):
+    def test_email_path_withholds_run_shell_and_delegate(self):
         # Verify allow_shell=False reaches the tools layer by intercepting call_cloud_model.
         seen_tools = []
         def spy(model, messages, tools):
@@ -234,6 +238,23 @@ class ConverseCloudTests(unittest.TestCase):
         gc.converse_cloud("hi", allow_shell=False)
         names = sorted(t["function"]["name"] for t in seen_tools[0])
         self.assertNotIn("run_shell", names)
+        self.assertNotIn("delegate_to_cc", names)
+
+    def test_no_fallback_after_tool_already_executed(self):
+        # A tool ran, THEN the same model attempt failed. Falling back to the
+        # next chain model here would replay the request and risk re-running
+        # the side-effecting tool (e.g. run_shell/send_email) a second time —
+        # the chain must stop instead of cascading to kimi.
+        self._script = [
+            self._reply("", [{"name": "run_shell", "arguments": {"command": "rm -f x"}}]),
+            gc.CloudCallError("http", 500),  # follow-up call fails after the tool ran
+        ]
+        out = gc.converse_cloud("do the thing", chat_id="5")
+        # Two calls to glm (dispatch turn + the failing follow-up), zero to kimi.
+        self.assertEqual(self.calls, ["glm-5.2:cloud", "glm-5.2:cloud"])
+        self.assertEqual(self.dispatched, [("run_shell", {"command": "rm -f x"})])
+        self.assertEqual(out, "cc-reply")  # falls through to CC escalation
+        self.assertIn("cloud tier exhausted", self.notifications[0])
 
     def test_history_saved_on_success(self):
         self._script = [self._reply("reply")]
@@ -284,6 +305,7 @@ class NoGeminiReferencesTests(unittest.TestCase):
         self.assertEqual(out, "email ok")
         names = sorted(t["function"]["name"] for t in seen["tools"])
         self.assertNotIn("run_shell", names)
+        self.assertNotIn("delegate_to_cc", names)
 
     def test_route_gg_uses_cloud_with_shell(self):
         gc._ensure_ollama = lambda: None
@@ -319,7 +341,7 @@ class DocsAndVersionTests(unittest.TestCase):
         self.assertNotIn("Gemini", txt)
 
     def test_version_bumped(self):
-        self.assertEqual(gc.__version__, "0.5.0")
+        self.assertEqual(gc.__version__, "0.5.1")
 
 
 if __name__ == "__main__":

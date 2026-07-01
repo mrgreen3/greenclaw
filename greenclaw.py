@@ -27,12 +27,13 @@ LAN / sole-user box. Secrets in .env (TELEGRAM_*).
 Deps: pip install httpx
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -126,18 +127,20 @@ def load_history():
 
 def save_history(key):
     os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    # Hold the lock across the whole read+write so two concurrent saves can't
+    # interleave and have the older snapshot clobber the newer one on rename.
     with _history_lock:
         data = {
             k: {"messages": v, "updated": _history_updated.get(k, 0)}
             for k, v in _history.items()
         }
-    tmp = HISTORY_FILE + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, HISTORY_FILE)
-    except Exception as e:
-        print(f"[history] failed to save: {e}")
+        tmp = HISTORY_FILE + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, HISTORY_FILE)
+        except Exception as e:
+            print(f"[history] failed to save: {e}")
 
 
 def _load_memory_from_disk():
@@ -605,6 +608,12 @@ class CloudCallError(Exception):
         super().__init__(f"{reason}:{status}")
         self.reason = reason
         self.status = status
+        # Set by _cloud_tool_loop when a side-effecting tool (run_shell,
+        # send_email, delegate_to_cc, ...) already ran this attempt before the
+        # failure — see converse_cloud, which uses this to avoid retrying the
+        # whole request on the next chain model (that would risk re-running
+        # the same tool call).
+        self.tool_calls_executed = False
 
 
 def call_cloud_model(model, messages, tools):
@@ -638,7 +647,11 @@ def call_cloud_model(model, messages, tools):
     raw_calls = msg.get("tool_calls") or []
     tool_calls = []
     for tc in raw_calls:
+        if not isinstance(tc, dict):
+            continue  # malformed tool-call entry from the model — skip, don't crash
         fn = tc.get("function") or tc
+        if not isinstance(fn, dict):
+            continue
         tool_calls.append({"name": fn.get("name", ""), "arguments": fn.get("arguments") or {}})
     return content, tool_calls
 
@@ -647,9 +660,14 @@ def _cloud_tools(allow_shell=True):
     """Build Ollama-format tool definitions from TOOLS plus delegate_to_cc.
 
     When allow_shell is False (the email path, where message bodies are
-    untrusted remote input), run_shell is withheld so a crafted body can't
-    steer the cloud model into running shell directly. delegate_to_cc stays —
-    the sender gate in tasks/email.py is the primary trust boundary there.
+    untrusted remote input), run_shell is withheld. delegate_to_cc is ALSO
+    withheld here: it routes to ask_cc() with --dangerously-skip-permissions,
+    i.e. full shell access — the same capability run_shell grants, just one
+    hop removed. The email From: header is not a real trust boundary (no
+    SPF/DKIM check), so a forged sender + prompt injection in the body could
+    otherwise reach delegate_to_cc and get full shell/sudo despite run_shell
+    being withheld. If email-initiated CC delegation is wanted later, it needs
+    its own narrower tool, not this one.
     """
     tools = [t for t in TOOLS if not (t["name"] == "run_shell" and not allow_shell)]
     out = [
@@ -657,22 +675,23 @@ def _cloud_tools(allow_shell=True):
          "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
         for t in tools
     ]
-    out.append({
-        "type": "function",
-        "function": {
-            "name": "delegate_to_cc",
-            "description": (
-                "Delegate to Claude Code when you cannot handle a task yourself — "
-                "e.g. checking email/Gmail, searching the web, or anything requiring "
-                "external access you don't have. Returns Claude Code's reply."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
-                "required": ["query"],
+    if allow_shell:
+        out.append({
+            "type": "function",
+            "function": {
+                "name": "delegate_to_cc",
+                "description": (
+                    "Delegate to Claude Code when you cannot handle a task yourself — "
+                    "e.g. checking email/Gmail, searching the web, or anything requiring "
+                    "external access you don't have. Returns Claude Code's reply."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "The task or question to send to Claude Code."}},
+                    "required": ["query"],
+                },
             },
-        },
-    })
+        })
     return out
 
 
@@ -682,11 +701,22 @@ def _cloud_tool_loop(model, messages, tools):
     Works on a copy of `messages` so a mid-loop failure leaves the caller's
     transcript clean for a retry on the next chain model. Raises CloudCallError
     on any hard failure from call_cloud_model. Bounded by CLOUD_MAX_STEPS.
+
+    If a CloudCallError happens AFTER at least one tool was already dispatched
+    (e.g. run_shell/send_email already ran, then the follow-up model call
+    fails), the error is tagged `.tool_calls_executed = True` so the caller
+    knows retrying on the next chain model would risk re-running the same
+    side-effecting tool call rather than just re-asking the same question.
     """
     msgs = list(messages)
     text_parts = []
+    any_tool_dispatched = False
     for _ in range(CLOUD_MAX_STEPS):
-        content, tool_calls = call_cloud_model(model, msgs, tools)
+        try:
+            content, tool_calls = call_cloud_model(model, msgs, tools)
+        except CloudCallError as e:
+            e.tool_calls_executed = any_tool_dispatched
+            raise
         if content:
             text_parts.append(content)
         if not tool_calls:
@@ -698,6 +728,7 @@ def _cloud_tool_loop(model, messages, tools):
             preview = args.get("command") or args.get("query") or args.get("text") or ""
             print(f"  [c:{name}] {preview[:120]}")
             result = dispatch_tool(name, args)
+            any_tool_dispatched = True
             msgs.append({"role": "tool", "name": name, "content": str(result)})
     return "\n".join(p for p in text_parts if p.strip()) or "(no reply)"
 
@@ -735,6 +766,14 @@ def converse_cloud(text, system_extra=None, chat_id=None, allow_shell=True):
             reply = _cloud_tool_loop(model, messages, tools)
         except CloudCallError as e:
             print(f"[cloud] {model} failed: {e.reason} ({e.status})")
+            if e.tool_calls_executed:
+                # A side-effecting tool (run_shell/send_email/delegate_to_cc)
+                # already ran this attempt. Retrying on the next chain model
+                # would replay the same request and risk re-running it — stop
+                # the chain here instead and escalate.
+                print(f"[cloud] {model} failed after executing a tool call — "
+                      "not retrying on the next chain model to avoid a duplicate side effect")
+                break
             if idx < len(CLOUD_CHAIN) - 1:
                 continue
             break
@@ -821,12 +860,22 @@ def ask_cc(prompt, chat_id=None):
     print("  [-> Claude Code]")
     try:
         cc_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-        p = subprocess.run(
+        # Own session so a timeout can kill the whole process group — CC spawns
+        # its own sub-agents/tool calls, and killing only the direct child
+        # (subprocess.run's default on TimeoutExpired) orphans the rest.
+        p = subprocess.Popen(
             [CC_BIN, "-p", prompt, "--model", "claude-haiku-4-5-20251001", "--dangerously-skip-permissions"],
-            capture_output=True, text=True, timeout=900, env=cc_env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=cc_env, start_new_session=True,
         )
-        out = (p.stdout or "").strip()
-        err = (p.stderr or "").strip()
+        try:
+            out, err = p.communicate(timeout=900)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.communicate()  # reap
+            return "[error] Claude Code timed out (15m)"
+        out = (out or "").strip()
+        err = (err or "").strip()
         if err:
             out += ("\n[stderr] " + err) if out else ("[stderr] " + err)
         out = out or "(no output)"
@@ -842,8 +891,6 @@ def ask_cc(prompt, chat_id=None):
                 _history_updated[key] = time.time()
             save_history(key)
         return out
-    except subprocess.TimeoutExpired:
-        return "[error] Claude Code timed out (15m)"
     except Exception as e:  # noqa: BLE001
         return f"[error] {e}"
 
@@ -951,6 +998,12 @@ def load_skills():
             print(f"[skills] {fn}: no run() — skipped")
             continue
         name = getattr(mod, "NAME", fn[:-3])
+        # Same locked/skills.allow gate as .md skills — a module opts in to
+        # gating with `LOCKED = True`; skills.allow still overrides it.
+        locked = bool(getattr(mod, "LOCKED", False))
+        if locked and name not in allow:
+            blocked.append(name)
+            continue
         trigger = getattr(mod, "TRIGGER", "")
         description = getattr(mod, "DESCRIPTION", "")
         if trigger and trigger in triggers_seen:
@@ -1322,9 +1375,9 @@ def route(text, chat_id=None):
     if text_lower.startswith("gg "):
         return converse_cloud(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
-        # Email bodies are untrusted remote input — withhold run_shell from the
-        # tool set. delegate_to_cc stays (the owner emailing in wants CC reach);
-        # the sender gate in tasks/email.py is the primary trust boundary.
+        # Email bodies are untrusted remote input — withhold run_shell AND
+        # delegate_to_cc from the tool set (see _cloud_tools docstring: the
+        # From: sender gate is spoofable and isn't a real trust boundary).
         return converse_cloud(text, chat_id=chat_id, allow_shell=False)
     result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
     if result.startswith("[error]"):
@@ -1429,9 +1482,13 @@ def main():
     load_history()
     load_skills()
     reload_memory()
-    _check_memory_threshold()
     log_heartbeat()
     threads = start_tasks()
+    # Run after tasks start, off the main thread — _check_memory_threshold can
+    # call ask_cc(), which blocks on a subprocess for up to 15 minutes. On the
+    # main thread that delays Telegram/email listeners from starting at all
+    # after every restart while memory is over threshold.
+    threading.Thread(target=_check_memory_threshold, daemon=True).start()
     if sys.stdin.isatty():
         run_terminal()  # tasks run alongside in their threads
     elif threads:
