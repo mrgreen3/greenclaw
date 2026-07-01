@@ -137,14 +137,14 @@ def start(on_message):
 
                     body = body.strip()
                     if not body:
-                        print(f"[email] empty body from {sender_email}, skipping")
+                        print(f"[email] empty body from {from_addr}, skipping")
                         mail.store(msg_id, "+FLAGS", "\\Seen")
                         continue
 
                     # Build text for routing (include subject for context)
                     text = f"[email subject: {subject}]\n{body}"
 
-                    print(f"[email] from {sender_email}: {subject[:50]}")
+                    print(f"[email] from {from_addr}: {subject[:50]}")
 
                     # Dispatch in a worker thread to keep IMAP connection free
                     def _dispatch(text=text, subject=subject, reply_to_addr=reply_to):
@@ -155,10 +155,14 @@ def start(on_message):
                         except Exception as e:  # noqa: BLE001
                             print(f"[email dispatch error] {e}")
 
-                    threading.Thread(target=_dispatch, daemon=True).start()
-
-                    # Mark as read
+                    # Mark as read BEFORE dispatching (claim-before-execute, same
+                    # pattern as tasks/github_inbox.py): if the process dies right
+                    # after starting the dispatch thread, we'd otherwise re-fetch
+                    # this message next restart and re-dispatch it, sending a
+                    # duplicate reply. Marking first risks losing a message instead
+                    # of duplicating one, which is the safer failure mode here.
                     mail.store(msg_id, "+FLAGS", "\\Seen")
+                    threading.Thread(target=_dispatch, daemon=True).start()
 
                 except Exception as e:  # noqa: BLE001
                     print(f"[email] message processing error: {e}")

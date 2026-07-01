@@ -49,7 +49,15 @@ def start(on_message):
     while True:
         try:
             r = httpx.get(f"{api}/getUpdates", params={"timeout": 30, "offset": offset}, timeout=40)
-            updates = r.json().get("result", [])
+            data = r.json()
+            if not data.get("ok", True):
+                # Telegram returns {"ok": false, "description": ...} on auth
+                # failure (revoked token) or a conflicting long-poll (409) —
+                # this was previously swallowed as "no updates" forever.
+                print(f"[telegram poll error] Telegram API: {data.get('description', 'unknown error')}")
+                time.sleep(5)
+                continue
+            updates = data.get("result", [])
         except Exception as e:  # noqa: BLE001
             print(f"[telegram poll error] {e}")
             time.sleep(5)

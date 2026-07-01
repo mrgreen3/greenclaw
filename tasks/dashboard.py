@@ -18,6 +18,7 @@ and is loaded automatically by greenclaw.py at boot.
 
 NAME = "dashboard"
 
+import hmac
 import json
 import os
 import subprocess
@@ -690,7 +691,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if DASHBOARD_TOKEN:
             auth = self.headers.get("Authorization", "")
             qtok = (parse_qs(parsed.query).get("token") or [""])[0]
-            if auth != f"Bearer {DASHBOARD_TOKEN}" and qtok != DASHBOARD_TOKEN:
+            auth_ok = hmac.compare_digest(auth, f"Bearer {DASHBOARD_TOKEN}")
+            qtok_ok = hmac.compare_digest(qtok, DASHBOARD_TOKEN)
+            if not auth_ok and not qtok_ok:
                 self.send_response(401)
                 self.send_header("Content-Type", "text/plain")
                 self.end_headers()

@@ -15,6 +15,7 @@ Design notes:
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -128,6 +129,19 @@ def close_issue(n):
     _request("PATCH", f"/repos/{OWNER}/{REPO}/issues/{n}", {"state": "closed"})
 
 
+# Env vars stripped from the CC subprocess before dispatch. CC's stdout is
+# posted verbatim as a public GitHub issue comment (see run_once), so any
+# secret left in its environment can leak there — not just the Anthropic key.
+_SECRET_ENV_SUFFIXES = ("_TOKEN", "_PASSWORD", "_SECRET", "_KEY")
+
+
+def _strip_secret_env(env: dict) -> dict:
+    return {
+        k: v for k, v in env.items()
+        if not any(k.upper().endswith(suf) for suf in _SECRET_ENV_SUFFIXES)
+    }
+
+
 def dispatch_to_cc(command: str) -> str:
     """
     Hand the command to Claude Code as a task prompt.
@@ -135,21 +149,35 @@ def dispatch_to_cc(command: str) -> str:
     SECURITY: `command` is remote input. Passed to CC as a *prompt*, never to a
     shell. The real guard is ALLOWED_AUTHOR + private repo + scoped PAT.
 
-    Env: ANTHROPIC_API_KEY is stripped so OAuth-authed CC never falls back to
-    the metered API path (mirrors greenclaw.ask_cc). --dangerously-skip-permissions
-    matches ask_cc so issue tasks can actually read/write files and run agents.
+    Env: every var ending in _TOKEN/_PASSWORD/_SECRET/_KEY is stripped (not
+    just ANTHROPIC_API_KEY) since CC's raw stdout is posted back as a public
+    issue comment — Telegram/email/dashboard credentials must not reach that
+    subprocess either. --dangerously-skip-permissions matches ask_cc so issue
+    tasks can actually read/write files and run agents.
+
+    The subprocess runs in its own session (start_new_session=True) so that on
+    timeout we can kill the whole process group, not just the direct `claude`
+    child — CC can spawn its own sub-agents/tool calls, and a plain
+    subprocess.run() timeout only kills the immediate child, orphaning the rest.
 
     SEAM: swap this function's body if you prefer to route into an existing
     Greenclaw dispatch path. Everything else stays the same.
     """
-    cc_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    proc = subprocess.run(
+    cc_env = _strip_secret_env(dict(os.environ))
+    proc = subprocess.Popen(
         ["claude", "-p", command, "--dangerously-skip-permissions"],
-        capture_output=True, text=True, timeout=CC_TIMEOUT, cwd=CC_WORKDIR, env=cc_env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        cwd=CC_WORKDIR, env=cc_env, start_new_session=True,
     )
+    try:
+        out, err = proc.communicate(timeout=CC_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()  # reap
+        raise RuntimeError(f"claude timed out after {CC_TIMEOUT}s")
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or "").strip() or f"claude exited {proc.returncode}")
-    return (proc.stdout or "").strip() or "(no output)"
+        raise RuntimeError((err or "").strip() or f"claude exited {proc.returncode}")
+    return (out or "").strip() or "(no output)"
 
 
 def run_once():
