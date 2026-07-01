@@ -90,7 +90,7 @@ GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
 GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "kimi-k2.7-code:cloud")
 CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
 CLOUD_MAX_STEPS = 8
-EMAIL_CC_KEYWORD = os.environ.get("EMAIL_CC_KEYWORD", "").strip()
+# EMAIL_CC_KEYWORD read at call time in route() — .env loads after module-level constants
 
 
 def _tz_stamp():
@@ -1380,7 +1380,8 @@ def route(text, chat_id=None):
         # is set and present in the body, escalate to CC (full autonomy).
         # Without the keyword, fall back to restricted cloud path (no run_shell,
         # no delegate_to_cc) — defence against From: header spoofing.
-        if EMAIL_CC_KEYWORD and EMAIL_CC_KEYWORD in text:
+        _email_cc_keyword = os.environ.get("EMAIL_CC_KEYWORD", "").strip()
+        if _email_cc_keyword and _email_cc_keyword in text:
             print("[route] email keyword matched — routing to CC")
             result = ask_cc(text, chat_id=chat_id)
             if result.startswith("[error]"):
