@@ -102,6 +102,13 @@ def start(on_message):
                     if status != "OK":
                         continue
 
+                    # Mark as seen as soon as we have the message, before parsing
+                    # it. A malformed message that throws mid-parse must not stay
+                    # \Unseen — otherwise it gets refetched and re-crashes on every
+                    # 30s poll forever. Losing one malformed message to a rare
+                    # mark-then-crash race is a far better failure mode than that.
+                    mail.store(msg_id, "+FLAGS", "\\Seen")
+
                     # Parse email
                     msg_bytes = msg_data[0][1]
                     parser = Parser()
@@ -121,7 +128,6 @@ def start(on_message):
                     # sender verification enable DKIM/SPF checking at the MTA.
                     if from_addr not in trusted_senders:
                         print(f"[email] blocked — untrusted sender: {from_addr}")
-                        mail.store(msg_id, "+FLAGS", "\\Seen")
                         continue
                     reply_to = reply_to_addr if reply_to_addr in trusted_senders else from_addr
 
@@ -138,7 +144,6 @@ def start(on_message):
                     body = body.strip()
                     if not body:
                         print(f"[email] empty body from {from_addr}, skipping")
-                        mail.store(msg_id, "+FLAGS", "\\Seen")
                         continue
 
                     # Build text for routing (include subject for context)
@@ -155,13 +160,9 @@ def start(on_message):
                         except Exception as e:  # noqa: BLE001
                             print(f"[email dispatch error] {e}")
 
-                    # Mark as read BEFORE dispatching (claim-before-execute, same
-                    # pattern as tasks/github_inbox.py): if the process dies right
-                    # after starting the dispatch thread, we'd otherwise re-fetch
-                    # this message next restart and re-dispatch it, sending a
-                    # duplicate reply. Marking first risks losing a message instead
-                    # of duplicating one, which is the safer failure mode here.
-                    mail.store(msg_id, "+FLAGS", "\\Seen")
+                    # Already marked \Seen right after fetch, above (claim-before-
+                    # execute, same pattern as tasks/github_inbox.py) — dispatch is
+                    # the last step now.
                     threading.Thread(target=_dispatch, daemon=True).start()
 
                 except Exception as e:  # noqa: BLE001

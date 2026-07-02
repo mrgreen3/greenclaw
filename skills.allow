@@ -2,3 +2,4 @@
 # Lines starting with # are ignored. Edit, then restart the service to apply.
 mail
 blog-post
+mailbox
