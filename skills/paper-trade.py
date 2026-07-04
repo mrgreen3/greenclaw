@@ -11,8 +11,7 @@ from datetime import datetime
 import httpx
 
 
-TRADING212_BASE_URL = "https://live.trading212.com/api/v0"
-DEMO_API_URL = "https://demo.trading212.com/api/v0"
+ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
 ETFS_CONFIG = os.path.expanduser("~/Projects/greenclaw/etfs.json")
 
 
@@ -35,36 +34,40 @@ def _load_config() -> dict:
         return {"error": f"Config load failed: {e}", "etfs": []}
 
 
-def _get_trading212_api_key() -> str:
-    """Fetch API key from .env."""
-    return os.environ.get("TRADING212_API_KEY", "").strip()
+def _get_alpha_vantage_key() -> str:
+    """Fetch API key from .env (optional for free tier)."""
+    return os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
 
 
-def _fetch_price(ticker: str, api_key: str, use_demo: bool = False) -> dict:
-    """Fetch current and previous close price from Trading 212.
+def _fetch_price(ticker: str, api_key: str = "") -> dict:
+    """Fetch current and previous close price from Alpha Vantage.
 
     Returns: {ticker, current, previous_close, error?}
     """
-    base_url = DEMO_API_URL if use_demo else TRADING212_BASE_URL
-
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-
     try:
-        # Endpoint: GET /accounts/{accountId}/positions or /instruments/{isin}
-        # For simplicity, trying the instrument endpoint first.
-        # NOTE: Trading 212 API docs should be confirmed for exact endpoint.
-        url = f"{base_url}/instruments?search={ticker}"
-        resp = httpx.get(url, headers=headers, timeout=10)
+        params = {
+            "function": "GLOBAL_QUOTE",
+            "symbol": ticker,
+        }
+        if api_key:
+            params["apikey"] = api_key
+
+        resp = httpx.get(ALPHA_VANTAGE_URL, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
 
-        if not data:
-            return {"ticker": ticker, "error": f"No data for {ticker}"}
+        if "Note" in data:
+            return {"ticker": ticker, "error": "Alpha Vantage rate limit reached"}
 
-        # Assuming response is a list; grab first match
-        instr = data[0] if isinstance(data, list) else data
-        current = instr.get("lastPrice") or instr.get("last")
-        prev_close = instr.get("previousClose")
+        if "Error Message" in data:
+            return {"ticker": ticker, "error": f"Symbol not found: {ticker}"}
+
+        quote = data.get("Global Quote", {})
+        if not quote:
+            return {"ticker": ticker, "error": "No quote data returned"}
+
+        current = float(quote.get("05. price", 0))
+        prev_close = float(quote.get("08. previous close", 0))
 
         if not current or not prev_close:
             return {"ticker": ticker, "error": "Missing price fields in API response"}
@@ -72,7 +75,9 @@ def _fetch_price(ticker: str, api_key: str, use_demo: bool = False) -> dict:
         return {"ticker": ticker, "current": current, "previous_close": prev_close}
 
     except httpx.HTTPStatusError as e:
-        return {"ticker": ticker, "error": f"API error {e.status_code}: {e.response.text}"}
+        return {"ticker": ticker, "error": f"API error {e.status_code}"}
+    except ValueError:
+        return {"ticker": ticker, "error": "Invalid price data (not numeric)"}
     except Exception as e:
         return {"ticker": ticker, "error": f"Price fetch failed: {e}"}
 
@@ -118,15 +123,15 @@ def _log_trade(csv_file: str, trade_record: dict) -> None:
 
 def run(args: str) -> str:
     """Main entry point: fetch prices, check triggers, log trades."""
-    api_key = _get_trading212_api_key()
+    api_key = _get_alpha_vantage_key()
     if not api_key:
-        return (
-            "⚠ TRADING212_API_KEY not set in .env\n\n"
-            "Set up read-only API key from Trading 212 app:\n"
-            "1. Log in to Trading 212\n"
-            "2. Settings → API → Create new key (read-only, no order placement)\n"
-            "3. Add to .env: TRADING212_API_KEY=<key>\n"
-            "4. Restart greenclaw\n"
+        import sys
+        print(
+            "⚠ ALPHA_VANTAGE_API_KEY not set in .env (optional, but recommended)\n"
+            "Free tier works without API key (5 calls/min), but with key: 500/min.\n"
+            "Get a free key: https://www.alphavantage.co/api/\n"
+            "Then add to .env: ALPHA_VANTAGE_API_KEY=<key>\n",
+            file=sys.stderr,
         )
 
     config = _load_config()

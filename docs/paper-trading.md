@@ -4,21 +4,26 @@ A zero-risk ETF buy-trigger simulator. Tracks price dips against configurable th
 
 ## Setup
 
-### 1. Get Trading 212 API Key
+### 1. Get Alpha Vantage API Key (Optional)
 
-1. Log in to Trading 212 app
-2. Go to Settings → API → Create new key
-3. **Important**: Request **read-only** access only. No order-placing permissions.
-4. Copy the key and add to `.env`:
+Price data comes from **Alpha Vantage** — a free market data API. No broker account needed.
+
+**Free tier**: 5 API calls/min, unlimited daily (no key required)
+**With API key**: 500 calls/min
+
+1. (Optional) Get a free API key at https://www.alphavantage.co/api/
+2. Add to `.env`:
 
 ```bash
-TRADING212_API_KEY=<your-key-here>
+ALPHA_VANTAGE_API_KEY=<your-key-here>
 ```
 
-5. Restart greenclaw:
+3. Restart greenclaw:
 ```bash
 systemctl --user restart greenclaw-bot.service
 ```
+
+**Note**: The skill works fine without an API key — you'll just be limited to 5 calls/min.
 
 ### 2. Configure ETFs
 
@@ -131,10 +136,11 @@ Result:
 
 ## API Notes
 
-- **Endpoint**: Trading 212 live API (`https://live.trading212.com/api/v0/...`)
-- **Auth**: Bearer token (from API key)
-- **Rate limit**: Check Trading 212 docs for free/demo tier limits
-- **Demo mode**: Falls back to demo API if live API fails (for testing)
+- **Endpoint**: Alpha Vantage Global Quote (`https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=...`)
+- **Auth**: Optional API key (free tier works without it)
+- **Rate limit**: 5 calls/min free tier; 500 calls/min with API key
+- **Data**: Real-time market prices (delayed 15-20 min for stocks/ETFs)
+- **Coverage**: 6000+ instruments including major stock exchanges and ETFs
 
 ## Limitations
 
@@ -152,31 +158,32 @@ Result:
 
 ## Troubleshooting
 
-### "TRADING212_API_KEY not set"
+### "Symbol not found"
 
-Add the key to `.env` and restart:
-```bash
-echo "TRADING212_API_KEY=<key>" >> .env
-systemctl --user restart greenclaw-bot.service
-```
+- Confirm ticker is valid and available on Alpha Vantage
+- Try a common ETF: VWRP, VMID, VUKE
+- Check Alpha Vantage coverage at https://www.alphavantage.co/
 
-### "API error 401"
+### "Rate limit reached"
 
-- Check that API key is valid (not expired)
-- Ensure read-only access is enabled in Trading 212 settings
-- Verify Bearer token format in code
+- Free tier: 5 calls/min. Wait a minute or add an API key for higher limits.
+- With API key: 500 calls/min. Get key at https://www.alphavantage.co/api/
 
-### "No data for ticker"
+### "Missing price fields"
 
-- Confirm ticker is valid and available on Trading 212
-- Check Trading 212 API docs for supported instruments
-- Try a common ETF (VWRP, VMID, VUKE) first to isolate the issue
+- Some tickers may not have previous close data
+- Try a different ticker or check Alpha Vantage docs for data availability
 
 ### CSV not created
 
 - Check CSV path in `etfs.json`
 - Ensure directory exists (`~/Projects/greenclaw/`)
 - Check file permissions
+
+### "Invalid price data (not numeric)"
+
+- Alpha Vantage may have returned non-numeric values
+- Try again in a moment; this is usually a transient API issue
 
 ## See Also
 
