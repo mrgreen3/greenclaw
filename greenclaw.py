@@ -1358,7 +1358,11 @@ def route(text, chat_id=None):
     is_email = text.startswith("[email subject:")
     if is_email:
         lines = text.split("\n", 1)
-        prefix_text = lines[1].strip() if len(lines) > 1 else text
+        prefix_text = lines[1].strip() if len(lines) > 1 else ""
+        if not prefix_text:
+            import re as _re
+            m = _re.match(r'\[email subject:\s*(.*?)\]', lines[0])
+            prefix_text = m.group(1).strip() if m else text
 
     text_lower = prefix_text.lower()
     if text_lower in ("usage", "calls"):
