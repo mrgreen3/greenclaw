@@ -1032,8 +1032,8 @@ def load_skills():
 # EMAIL SEND UTILITY
 # ---------------------------------------------------------------------------
 
-def send_email(subject, body, attachment_path=None):
-    """Send an email using EMAIL_* env vars. Optionally attach a file. Returns error string or None."""
+def send_email(subject, body, attachment_path=None, html=None):
+    """Send an email using EMAIL_* env vars. Optionally attach a file or send HTML. Returns error string or None."""
     import smtplib
     import mimetypes
     from email.mime.text import MIMEText
@@ -1052,11 +1052,23 @@ def send_email(subject, body, attachment_path=None):
         return "[email] EMAIL_SMTP_HOST, EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_TRUSTED_SENDERS required"
 
     try:
-        msg = MIMEMultipart()
+        if html:
+            # multipart/alternative: plain text fallback + HTML part
+            alt = MIMEMultipart("alternative")
+            alt.attach(MIMEText(body, "plain"))
+            alt.attach(MIMEText(html, "html"))
+            if attachment_path:
+                msg = MIMEMultipart("mixed")
+                msg.attach(alt)
+            else:
+                msg = alt
+        else:
+            msg = MIMEMultipart()
+            msg.attach(MIMEText(body, "plain"))
+
         msg["Subject"] = subject
         msg["From"] = email_addr
         msg["To"] = to_addr
-        msg.attach(MIMEText(body, "plain"))
 
         if attachment_path:
             attachment_path = os.path.expanduser(attachment_path)
@@ -1282,7 +1294,13 @@ def start_scheduler(reply_fn):
                 state[sched["name"]] = now.isoformat()
                 _save_schedule_state(state)
                 if sched.get("output") == "email":
-                    err = send_email(f"⏰ {sched['name']}", result)
+                    stripped = result.strip()
+                    html_body = stripped if stripped.startswith("<") else None
+                    plain_body = stripped if not html_body else "\n".join(
+                        line for line in __import__("re").sub(r"<[^>]+>", "", stripped).splitlines()
+                        if line.strip()
+                    )
+                    err = send_email(f"⏰ {sched['name']}", plain_body, html=html_body)
                     if err:
                         reply_fn(err)
                 else:

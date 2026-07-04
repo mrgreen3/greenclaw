@@ -49,7 +49,7 @@ def start(on_message):
     print(f"[email] running — listening on {email_addr} (trusted senders: {', '.join(trusted_senders)})")
 
     def send_reply(recipient, subject, body):
-        """Send an email reply via SMTP."""
+        """Send an email reply via SMTP. Returns True on success, False on failure."""
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
@@ -68,8 +68,29 @@ def start(on_message):
                     smtp.login(email_addr, email_pass)
                     smtp.sendmail(email_addr, recipient, msg.as_string())
             print(f"[email] reply sent to {recipient}")
+            return True
         except Exception as e:  # noqa: BLE001
             print(f"[email send error] {e}")
+            return False
+
+    def delete_message(msg_uid):
+        """Permanently remove a message from INBOX by UID, once its reply has
+        been sent. Runs on its own short-lived IMAP connection since the main
+        poll connection is closed by the time a reply (which goes through the
+        model) comes back. UID (not sequence number) survives across
+        connections and is unaffected by other messages being expunged.
+        """
+        try:
+            m = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=30)
+            m.login(email_addr, email_pass)
+            m.select("INBOX")
+            m.uid("STORE", msg_uid, "+FLAGS", "(\\Deleted)")
+            m.expunge()
+            m.close()
+            m.logout()
+            print(f"[email] deleted uid {msg_uid.decode() if isinstance(msg_uid, bytes) else msg_uid} after reply")
+        except Exception as e:  # noqa: BLE001
+            print(f"[email] delete error: {e}")
 
     while True:
         try:
@@ -78,8 +99,11 @@ def start(on_message):
             mail.login(email_addr, email_pass)
             mail.select("INBOX")
 
-            # Search for unread messages
-            status, msg_ids = mail.search(None, "UNSEEN")
+            # Search for unread messages. UID (not sequence number) is used
+            # throughout so delete_message() can reference the same message
+            # later from a fresh connection, after other messages in this
+            # batch may have shifted sequence numbers via expunge.
+            status, msg_ids = mail.uid("SEARCH", None, "UNSEEN")
             if status != "OK":
                 print("[email] IMAP search failed")
                 mail.close()
@@ -96,9 +120,9 @@ def start(on_message):
                 continue
 
             # Process each message
-            for msg_id in msg_list:
+            for msg_uid in msg_list:
                 try:
-                    status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                    status, msg_data = mail.uid("FETCH", msg_uid, "(RFC822)")
                     if status != "OK":
                         continue
 
@@ -107,7 +131,7 @@ def start(on_message):
                     # \Unseen — otherwise it gets refetched and re-crashes on every
                     # 30s poll forever. Losing one malformed message to a rare
                     # mark-then-crash race is a far better failure mode than that.
-                    mail.store(msg_id, "+FLAGS", "\\Seen")
+                    mail.uid("STORE", msg_uid, "+FLAGS", "\\Seen")
 
                     # Parse email
                     msg_bytes = msg_data[0][1]
@@ -152,10 +176,14 @@ def start(on_message):
                     print(f"[email] from {from_addr}: {subject[:50]}")
 
                     # Dispatch in a worker thread to keep IMAP connection free
-                    def _dispatch(text=text, subject=subject, reply_to_addr=reply_to):
+                    def _dispatch(text=text, subject=subject, reply_to_addr=reply_to, msg_uid=msg_uid):
                         try:
                             def _reply(response_text):
-                                send_reply(reply_to_addr, f"Re: {subject}", response_text)
+                                if send_reply(reply_to_addr, f"Re: {subject}", response_text):
+                                    # Only remove the message once the reply
+                                    # actually went out — a failed send should
+                                    # leave it in the mailbox to retry/notice.
+                                    delete_message(msg_uid)
                             on_message(text, _reply, "email")
                         except Exception as e:  # noqa: BLE001
                             print(f"[email dispatch error] {e}")
