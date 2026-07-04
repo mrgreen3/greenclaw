@@ -1357,11 +1357,17 @@ def route(text, chat_id=None):
     prefix_text = text
     is_email = text.startswith("[email subject:")
     if is_email:
+        import re as _re
         lines = text.split("\n", 1)
-        prefix_text = lines[1].strip() if len(lines) > 1 else ""
-        if not prefix_text:
-            import re as _re
-            m = _re.match(r'\[email subject:\s*(.*?)\]', lines[0])
+        subject_line = lines[0]
+        body = lines[1] if len(lines) > 1 else ""
+        # Strip quoted reply lines (lines starting with >) — Gmail threads include them
+        clean_body = "\n".join(l for l in body.splitlines() if not l.startswith(">")).strip()
+        if clean_body:
+            prefix_text = clean_body
+        else:
+            # Empty or all-quoted body — route on subject
+            m = _re.match(r'\[email subject:\s*(.*?)\]', subject_line)
             prefix_text = m.group(1).strip() if m else text
 
     text_lower = prefix_text.lower()
