@@ -7,5 +7,9 @@ cc_calls.jsonl
 bot.log
 *.log
 CLAUDE.md
-skills/
-schedules/
+
+# Ignore personal skills/schedules
+skills/*
+schedules/*
+!skills/paper-trade.py
+!schedules/paper-trade.md
