@@ -1029,6 +1029,232 @@ def load_skills():
 
 
 # ---------------------------------------------------------------------------
+# BLOG POST EMAIL HANDLER
+# ---------------------------------------------------------------------------
+
+def parse_blog_email(subject, body):
+    """Parse email into blog post components.
+
+    Subject: "blog: post title" or "post: post title"
+    Body: optional YAML front matter (tags, description) then post content
+
+    Returns (slug, title, content, tags, description) or (None, ...) if not valid.
+    """
+    import re
+    import re as _re
+
+    # Check for blog/post prefix
+    subj_lower = subject.lower().strip()
+    title = None
+    if subj_lower.startswith("blog:"):
+        title = subject[5:].strip()
+    elif subj_lower.startswith("post:"):
+        title = subject[5:].strip()
+
+    if not title:
+        return None, None, None, None, None
+
+    # Parse optional YAML front matter from body
+    # Format: tags: tag1, tag2 | description: one-liner
+    tags = []
+    description = ""
+    content = body
+
+    lines = body.split("\n")
+    front_matter_lines = []
+    content_start_idx = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip().lower()
+        if stripped.startswith("tags:"):
+            tags_part = line.split(":", 1)[1].strip()
+            tags = [t.strip() for t in tags_part.split(",") if t.strip()]
+            front_matter_lines.append(i)
+        elif stripped.startswith("description:"):
+            description = line.split(":", 1)[1].strip()
+            front_matter_lines.append(i)
+        elif front_matter_lines and stripped == "":
+            # Empty line after front matter marks the start of content
+            content_start_idx = i + 1
+            break
+        elif not front_matter_lines:
+            # First non-front-matter line
+            content_start_idx = i
+            break
+
+    if content_start_idx > 0:
+        content = "\n".join(lines[content_start_idx:]).strip()
+
+    # Generate slug from title: lowercase, spaces->hyphens, remove special chars
+    slug = _re.sub(r'[^a-z0-9\s-]', '', title.lower())
+    slug = _re.sub(r'\s+', '-', slug).strip("-")
+
+    # Add date prefix if not present
+    from datetime import datetime
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    if not slug.startswith(date_str):
+        slug = f"{date_str}-{slug}"
+
+    return slug, title, content, tags, description
+
+
+def create_blog_post(slug, title, content, tags=None, description=""):
+    """Create a Zola blog post at ~/blog/content/posts/{slug}.md
+
+    Returns (success: bool, message: str, live_url: str or None)
+    """
+    import subprocess
+    from datetime import datetime
+
+    blog_dir = os.path.expanduser("~/blog")
+    posts_dir = os.path.join(blog_dir, "content", "posts")
+    post_file = os.path.join(posts_dir, f"{slug}.md")
+
+    # Check if post already exists
+    if os.path.exists(post_file):
+        return False, f"Post already exists: {slug}", None
+
+    # Ensure directory exists
+    os.makedirs(posts_dir, exist_ok=True)
+
+    # Build TOML front matter
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    tags = tags or []
+    if not isinstance(tags, list):
+        tags = [tags] if tags else []
+
+    tags_str = ', '.join(f'"{tag}"' for tag in tags) if tags else ""
+
+    # Use greenclaw tag if no tags specified
+    if not tags_str:
+        tags_str = '"greenclaw"'
+
+    if not description:
+        description = title  # Fallback to title if no description
+
+    front_matter = f'''+++
+title = "{title.replace('"', '\\"')}"
+date = {date_str}
+description = "{description.replace('"', '\\"')}"
+
+[taxonomies]
+tags = [{tags_str}]
++++
+
+{content.strip()}
+
+>_
+'''
+
+    # Write post file
+    try:
+        with open(post_file, "w") as f:
+            f.write(front_matter)
+    except Exception as e:
+        return False, f"Failed to write post: {e}", None
+
+    # Commit and push (delegate to git)
+    try:
+        # Change to blog directory and commit
+        result = subprocess.run(
+            ["git", "add", post_file],
+            cwd=blog_dir,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            return False, f"Git add failed: {result.stderr}", None
+
+        result = subprocess.run(
+            ["git", "commit", "-m", f"add: {slug}"],
+            cwd=blog_dir,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            return False, f"Git commit failed: {result.stderr}", None
+
+        # Deploy using deploy.sh
+        deploy_script = os.path.join(blog_dir, "deploy.sh")
+        if os.path.exists(deploy_script):
+            result = subprocess.run(
+                ["bash", deploy_script],
+                cwd=blog_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                return False, f"Deploy failed: {result.stderr}", None
+    except subprocess.TimeoutExpired:
+        return False, "Git/deploy timeout", None
+    except Exception as e:
+        return False, f"Git/deploy error: {e}", None
+
+    # Build live URL (extract from blog config or use default)
+    try:
+        config_path = os.path.join(blog_dir, "config.toml")
+        with open(config_path) as f:
+            import re as _re
+            match = _re.search(r'base_url\s*=\s*["\']([^"\']+)["\']', f.read())
+            base_url = match.group(1) if match else "https://mrgreen.blog"
+    except Exception:
+        base_url = "https://mrgreen.blog"
+
+    live_url = f"{base_url.rstrip('/')}/{slug}/"
+
+    return True, f"Post created: {slug}", live_url
+
+
+def handle_blog_post_email(text):
+    """Process blog post emails.
+
+    Format:
+      Subject: blog: My Post Title  (or "post: ...")
+      Body: optional front matter, then post content
+
+    Returns (success: bool, message: str)
+    """
+    import re
+
+    # Parse the email format
+    if not text.startswith("[email subject:"):
+        return False, "Not an email"
+
+    lines = text.split("\n", 1)
+    subject_line = lines[0]
+    body = lines[1] if len(lines) > 1 else ""
+
+    # Extract subject
+    m = re.match(r'\[email subject:\s*(.*?)\]', subject_line)
+    if not m:
+        return False, "Could not parse email subject"
+    subject = m.group(1).strip()
+
+    # Strip quoted reply lines
+    clean_body = "\n".join(l for l in body.splitlines() if not l.startswith(">")).strip()
+
+    # Parse blog email
+    slug, title, content, tags, description = parse_blog_email(subject, clean_body)
+
+    if not slug:
+        return False, "Email subject must start with 'blog:' or 'post:'"
+
+    if not content.strip():
+        return False, "Email body cannot be empty"
+
+    # Create the post
+    success, message, live_url = create_blog_post(slug, title, content, tags, description)
+
+    if success and live_url:
+        return True, f"✓ Post published: {live_url}"
+    else:
+        return success, message
+
+
+# ---------------------------------------------------------------------------
 # EMAIL SEND UTILITY
 # ---------------------------------------------------------------------------
 
@@ -1404,6 +1630,16 @@ def route(text, chat_id=None):
     if text_lower.startswith("gg "):
         return converse_cloud(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
+        # Check if this is a blog post email (subject: "blog: ..." or "post: ...")
+        import re as _re
+        m = _re.match(r'\[email subject:\s*(.*?)\]', text.split("\n", 1)[0])
+        subj = m.group(1).strip() if m else ""
+        subj_lower = subj.lower()
+        if subj_lower.startswith("blog:") or subj_lower.startswith("post:"):
+            print("[route] blog post email detected")
+            success, message = handle_blog_post_email(text)
+            return message  # Returns the success/error message
+
         # Trusted sender already verified in tasks/email.py. If EMAIL_CC_KEYWORD
         # is set and present in the body, escalate to CC (full autonomy).
         # Without the keyword, fall back to restricted cloud path (no run_shell,
