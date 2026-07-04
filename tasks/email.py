@@ -18,6 +18,7 @@ Config (in .env):
 """
 
 import os
+import re
 import threading
 import time
 import imaplib
@@ -51,11 +52,20 @@ def start(on_message):
     def send_reply(recipient, subject, body):
         """Send an email reply via SMTP. Returns True on success, False on failure."""
         try:
-            msg = MIMEMultipart("alternative")
+            stripped = body.strip()
+            if stripped.startswith("<"):
+                plain = "\n".join(
+                    line for line in re.sub(r"<[^>]+>", "", stripped).splitlines() if line.strip()
+                )
+                msg = MIMEMultipart("alternative")
+                msg.attach(MIMEText(plain, "plain"))
+                msg.attach(MIMEText(stripped, "html"))
+            else:
+                msg = MIMEMultipart("alternative")
+                msg.attach(MIMEText(body, "plain"))
             msg["Subject"] = subject
             msg["From"] = email_addr
             msg["To"] = recipient
-            msg.attach(MIMEText(body, "plain"))
 
             # Port 465 = SMTPS (implicit TLS); port 587 = SMTP + STARTTLS
             if smtp_port == 465:
