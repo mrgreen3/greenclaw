@@ -524,6 +524,10 @@ def report_version():
     return f"greenclaw {__version__}"
 
 
+def report_model():
+    return f"cloud primary: {GC_CLOUD_MODEL}\nfallback: {GC_CLOUD_FALLBACK}"
+
+
 STATIC_DIR = os.path.join(_HERE, "static")
 CHEAT_FILE = os.path.join(STATIC_DIR, "cheat.md")
 
@@ -1601,6 +1605,8 @@ def route(text, chat_id=None):
         return report_usage()
     if text_lower in ("/version", "version"):
         return report_version()
+    if text_lower in ("/model", "model"):
+        return report_model()
     if text_lower in ("/cheat", "cheat"):
         return report_cheat()
     if text_lower in ("/watch", "watch"):
