@@ -87,7 +87,7 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_IDLE_TIMEOUT = 600  # seconds before auto-shutdown after last use
 CLOUD_SEMAPHORE = threading.Semaphore(3)  # Ollama Cloud: 3 concurrent models
 GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
-GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "kimi-k2.7-code:cloud")
+GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "gemma4:cloud")
 CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
 CLOUD_MAX_STEPS = 8
 # EMAIL_CC_KEYWORD read at call time in route() — .env loads after module-level constants
