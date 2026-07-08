@@ -157,7 +157,7 @@ def run(args: str) -> str:
             continue
 
         # Fetch prices (try live, fallback to demo if key issues)
-        prices = _fetch_price(ticker, api_key, use_demo=False)
+        prices = _fetch_price(ticker, api_key)
 
         if "error" in prices:
             errors.append(f"{ticker}: {prices['error']}")
