@@ -90,6 +90,7 @@ GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
 GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "gemma4:cloud")
 CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
 CLOUD_MAX_STEPS = 8
+GC_CC_MODEL = os.environ.get("GC_CC_MODEL", "claude-haiku-4-5-20251001")
 # EMAIL_CC_KEYWORD read at call time in route() — .env loads after module-level constants
 
 
@@ -869,7 +870,7 @@ def ask_cc(prompt, chat_id=None):
         # its own sub-agents/tool calls, and killing only the direct child
         # (subprocess.run's default on TimeoutExpired) orphans the rest.
         p = subprocess.Popen(
-            [CC_BIN, "-p", prompt, "--model", "claude-haiku-4-5-20251001", "--dangerously-skip-permissions"],
+            [CC_BIN, "-p", prompt, "--model", GC_CC_MODEL, "--dangerously-skip-permissions"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=cc_env, start_new_session=True,
         )
