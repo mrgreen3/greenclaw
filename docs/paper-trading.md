@@ -20,7 +20,7 @@ ALPHA_VANTAGE_API_KEY=<your-key-here>
 
 3. Restart greenclaw:
 ```bash
-systemctl --user restart greenclaw-bot.service
+systemctl --user restart greenclaw.service
 ```
 
 **Note**: The skill works fine without an API key — you'll just be limited to 5 calls/min.

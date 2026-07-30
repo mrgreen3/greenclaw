@@ -87,7 +87,7 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_IDLE_TIMEOUT = 600  # seconds before auto-shutdown after last use
 CLOUD_SEMAPHORE = threading.Semaphore(3)  # Ollama Cloud: 3 concurrent models
 GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
-GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "gemma4:cloud")
+GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "kimi-k2.7-code:cloud")
 CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
 CLOUD_MAX_STEPS = 8
 GC_CC_MODEL = os.environ.get("GC_CC_MODEL", "claude-haiku-4-5-20251001")
@@ -1045,7 +1045,6 @@ def parse_blog_email(subject, body):
 
     Returns (slug, title, content, tags, description) or (None, ...) if not valid.
     """
-    import re
     import re as _re
 
     # Check for blog/post prefix
