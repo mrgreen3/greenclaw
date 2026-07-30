@@ -21,6 +21,7 @@ NAME = "dashboard"
 import hmac
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -28,7 +29,7 @@ import urllib.request
 from datetime import datetime
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # Paths (mirrors greenclaw.py)
@@ -70,8 +71,9 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 def _run(cmd):
+    """Run a command given as an argv list (no shell)."""
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, timeout=5).strip()
+        return subprocess.check_output(cmd, text=True, timeout=5).strip()
     except Exception:
         return ""
 
@@ -79,7 +81,11 @@ def _run(cmd):
 def system_info():
     """Gather lightweight system stats without psutil."""
     # uptime
-    uptime_raw = _run("cat /proc/uptime")
+    try:
+        with open("/proc/uptime") as f:
+            uptime_raw = f.read()
+    except Exception:
+        uptime_raw = ""
     try:
         secs = float(uptime_raw.split()[0])
         days = int(secs // 86400)
@@ -123,9 +129,9 @@ def system_info():
     mem_total_gb = round(mem_total_kb / 1024 / 1024, 1)
 
     # disk
-    disk_raw = _run("df -k / | tail -1")
+    disk_raw = _run(["df", "-k", "/"])
     try:
-        parts = disk_raw.split()
+        parts = disk_raw.splitlines()[-1].split()
         disk_total_gb = round(int(parts[1]) / 1024 / 1024, 0)
         disk_used_gb = round(int(parts[2]) / 1024 / 1024, 0)
         disk_pct = round(int(parts[4].rstrip("%")))
@@ -134,11 +140,15 @@ def system_info():
         disk_pct = 0
 
     # load average
-    loadavg = _run("cat /proc/loadavg")
+    try:
+        with open("/proc/loadavg") as f:
+            loadavg = f.read()
+    except Exception:
+        loadavg = ""
     load_parts = loadavg.split()[:3] if loadavg else ["?", "?", "?"]
 
     # hostname
-    hostname = _run("hostname")
+    hostname = socket.gethostname()
 
     return {
         "hostname": hostname or "greenclaw",
@@ -688,12 +698,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         # Token gate (optional). When set, require a bearer token so the page
         # (which shows CC prompts, notes, memory filenames) isn't exposed.
+        # Authorization header only — a ?token= query string ends up in proxy
+        # logs, browser history, and Referer headers.
         if DASHBOARD_TOKEN:
             auth = self.headers.get("Authorization", "")
-            qtok = (parse_qs(parsed.query).get("token") or [""])[0]
             auth_ok = hmac.compare_digest(auth, f"Bearer {DASHBOARD_TOKEN}")
-            qtok_ok = hmac.compare_digest(qtok, DASHBOARD_TOKEN)
-            if not auth_ok and not qtok_ok:
+            if not auth_ok:
                 self.send_response(401)
                 self.send_header("Content-Type", "text/plain")
                 self.end_headers()

@@ -256,17 +256,17 @@ def _build_system():
     """Build the cloud model system prompt from real runtime facts gathered once at startup."""
     try:
         raw = subprocess.check_output(
-            "grep PRETTY_NAME /etc/os-release", shell=True, text=True
+            ["grep", "PRETTY_NAME", "/etc/os-release"], text=True
         ).strip()
         os_name = raw.split("=", 1)[-1].strip('"')
     except Exception:
         os_name = "Linux"
     try:
-        probe = subprocess.check_output(
-            "which pacman yay systemctl journalctl git python claude 2>/dev/null",
-            shell=True, text=True,
-        ).strip()
-        tools = ", ".join(os.path.basename(t) for t in probe.splitlines() if t)
+        result = subprocess.run(
+            ["which", "pacman", "yay", "systemctl", "journalctl", "git", "python", "claude"],
+            capture_output=True, text=True,
+        )
+        tools = ", ".join(os.path.basename(t) for t in result.stdout.strip().splitlines() if t)
     except Exception:
         tools = "standard Linux tools"
     return (
