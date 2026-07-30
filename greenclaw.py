@@ -212,12 +212,19 @@ def _check_memory_threshold():
     except Exception:
         pass
     print(f"[memory] size threshold exceeded — requesting CC compaction")
-    ask_cc(
+    result = ask_cc(
         "Memory has grown large. Review all files in ~/.claude/projects/-home-mrgreen/memory/, "
         "consolidate overlapping entries, summarise older content into fewer files, and remove "
         "trivial or outdated facts. Preserve user preferences, recurring patterns, and active "
         "project context. Update MEMORY.md accordingly."
     )
+    if result.startswith("[error]"):
+        # Don't mark the cooldown on failure — retry on the next boot instead
+        # of silently sitting over threshold for a full cooldown period.
+        print(f"[memory] compaction failed, not marking cooldown: {result}")
+        notify_telegram(f"⚠️ memory compaction failed: {result}")
+        return
+    print("[memory] compaction finished")
     os.makedirs(os.path.dirname(MEMORY_COMPACTION_STATE), exist_ok=True)
     try:
         with open(MEMORY_COMPACTION_STATE, "w") as f:
@@ -1711,6 +1718,12 @@ def run_terminal():
 
 
 def main():
+    # systemd sends SIGTERM on stop/restart. Without a handler, the default
+    # action kills the process immediately mid-syscall — any in-flight file
+    # write skips its `finally`/context-manager cleanup, and a CC subprocess
+    # can be orphaned running under init instead of dying with its parent.
+    # Raising SystemExit instead unwinds normally through those blocks.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     load_env()
     load_history()
     load_skills()
