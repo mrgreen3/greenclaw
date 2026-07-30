@@ -8,11 +8,11 @@ import json
 import os
 from datetime import datetime
 
-import httpx
+import yfinance as yf
 
 
-ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
-ETFS_CONFIG = os.path.expanduser("~/Projects/greenclaw/etfs.json")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+ETFS_CONFIG = os.path.join(_HERE, "..", "etfs.json")
 
 
 def _load_config() -> dict:
@@ -34,50 +34,26 @@ def _load_config() -> dict:
         return {"error": f"Config load failed: {e}", "etfs": []}
 
 
-def _get_alpha_vantage_key() -> str:
-    """Fetch API key from .env (optional for free tier)."""
-    return os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
-
-
-def _fetch_price(ticker: str, api_key: str = "") -> dict:
-    """Fetch current and previous close price from Alpha Vantage.
+def _fetch_price(ticker: str) -> dict:
+    """Fetch current and previous close price from Yahoo Finance.
 
     Returns: {ticker, current, previous_close, error?}
     """
     try:
-        params = {
-            "function": "GLOBAL_QUOTE",
-            "symbol": ticker,
-        }
-        if api_key:
-            params["apikey"] = api_key
+        ticker_obj = yf.Ticker(ticker)
+        hist = ticker_obj.history(period="5d")
 
-        resp = httpx.get(ALPHA_VANTAGE_URL, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        if hist.empty:
+            return {"ticker": ticker, "error": f"No data found for {ticker}"}
 
-        if "Note" in data:
-            return {"ticker": ticker, "error": "Alpha Vantage rate limit reached"}
-
-        if "Error Message" in data:
-            return {"ticker": ticker, "error": f"Symbol not found: {ticker}"}
-
-        quote = data.get("Global Quote", {})
-        if not quote:
-            return {"ticker": ticker, "error": "No quote data returned"}
-
-        current = float(quote.get("05. price", 0))
-        prev_close = float(quote.get("08. previous close", 0))
+        current = float(hist["Close"].iloc[-1])
+        prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else current
 
         if not current or not prev_close:
-            return {"ticker": ticker, "error": "Missing price fields in API response"}
+            return {"ticker": ticker, "error": "Invalid price data"}
 
         return {"ticker": ticker, "current": current, "previous_close": prev_close}
 
-    except httpx.HTTPStatusError as e:
-        return {"ticker": ticker, "error": f"API error {e.status_code}"}
-    except ValueError:
-        return {"ticker": ticker, "error": "Invalid price data (not numeric)"}
     except Exception as e:
         return {"ticker": ticker, "error": f"Price fetch failed: {e}"}
 
@@ -123,17 +99,6 @@ def _log_trade(csv_file: str, trade_record: dict) -> None:
 
 def run(args: str) -> str:
     """Main entry point: fetch prices, check triggers, log trades."""
-    api_key = _get_alpha_vantage_key()
-    if not api_key:
-        import sys
-        print(
-            "⚠ ALPHA_VANTAGE_API_KEY not set in .env (optional, but recommended)\n"
-            "Free tier works without API key (5 calls/min), but with key: 500/min.\n"
-            "Get a free key: https://www.alphavantage.co/api/\n"
-            "Then add to .env: ALPHA_VANTAGE_API_KEY=<key>\n",
-            file=sys.stderr,
-        )
-
     config = _load_config()
     if "error" in config:
         return f"Config error: {config['error']}"
@@ -156,8 +121,8 @@ def run(args: str) -> str:
         if not ticker:
             continue
 
-        # Fetch prices (try live, fallback to demo if key issues)
-        prices = _fetch_price(ticker, api_key)
+        # Fetch prices from Yahoo Finance
+        prices = _fetch_price(ticker)
 
         if "error" in prices:
             errors.append(f"{ticker}: {prices['error']}")
