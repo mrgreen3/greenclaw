@@ -46,6 +46,13 @@ def start(on_message):
         print("[telegram] running — UNLOCKED: reports chat ids only, executes nothing. "
               "Message it, set TELEGRAM_CHAT_ID in .env, restart.")
 
+    # Escalating backoff on persistent poll errors (revoked token, network
+    # down) — 5s, 10s, 20s, ... capped at 60s, reset once polling recovers.
+    # Only logs when the backoff interval changes, so a long outage doesn't
+    # spam the journal with an identical line every few seconds.
+    backoff = 5
+    logged_backoff = None
+
     while True:
         try:
             r = httpx.get(f"{api}/getUpdates", params={"timeout": 30, "offset": offset}, timeout=40)
@@ -54,14 +61,24 @@ def start(on_message):
                 # Telegram returns {"ok": false, "description": ...} on auth
                 # failure (revoked token) or a conflicting long-poll (409) —
                 # this was previously swallowed as "no updates" forever.
-                print(f"[telegram poll error] Telegram API: {data.get('description', 'unknown error')}")
-                time.sleep(5)
+                if backoff != logged_backoff:
+                    print(f"[telegram poll error] Telegram API: {data.get('description', 'unknown error')} "
+                          f"— backing off to {backoff}s")
+                    logged_backoff = backoff
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
                 continue
             updates = data.get("result", [])
         except Exception as e:  # noqa: BLE001
-            print(f"[telegram poll error] {e}")
-            time.sleep(5)
+            if backoff != logged_backoff:
+                print(f"[telegram poll error] {e} — backing off to {backoff}s")
+                logged_backoff = backoff
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
             continue
+
+        backoff = 5
+        logged_backoff = None
 
         for upd in updates:
             offset = upd["update_id"] + 1
