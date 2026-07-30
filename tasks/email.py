@@ -19,14 +19,18 @@ Config (in .env):
 
 import os
 import re
+import sys
 import threading
 import time
 import imaplib
-import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.parser import Parser
 from email.utils import parseaddr
+
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _HERE)
+from shared import send_smtp  # noqa: E402
 
 NAME = "email"
 DESCRIPTION = "Email task via IMAP/SMTP"
@@ -67,16 +71,10 @@ def start(on_message):
             msg["From"] = email_addr
             msg["To"] = recipient
 
-            # Port 465 = SMTPS (implicit TLS); port 587 = SMTP + STARTTLS
-            if smtp_port == 465:
-                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
-                    smtp.login(email_addr, email_pass)
-                    smtp.sendmail(email_addr, recipient, msg.as_string())
-            else:
-                with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
-                    smtp.starttls()
-                    smtp.login(email_addr, email_pass)
-                    smtp.sendmail(email_addr, recipient, msg.as_string())
+            err = send_smtp(smtp_host, smtp_port, email_addr, email_pass, recipient, msg)
+            if err:
+                print(err)
+                return False
             print(f"[email] reply sent to {recipient}")
             return True
         except Exception as e:  # noqa: BLE001
