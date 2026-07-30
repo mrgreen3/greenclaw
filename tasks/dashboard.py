@@ -75,10 +75,13 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 def _run(cmd):
-    """Run a command given as an argv list (no shell)."""
+    """Run a command given as an argv list (no shell). Logs and returns ""
+    on failure so a command actually failing isn't indistinguishable from
+    a command that just produced no output."""
     try:
         return subprocess.check_output(cmd, text=True, timeout=5).strip()
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        print(f"[dashboard] {' '.join(cmd)}: {e}")
         return ""
 
 

@@ -237,8 +237,8 @@ def _prune_file(path, keep):
             with open(tmp, "w") as f:
                 f.writelines(lines[-keep:])
             os.replace(tmp, path)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[prune] {path}: {e}")
 
 
 def log_heartbeat():
@@ -622,6 +622,9 @@ class CloudCallError(Exception):
         self.tool_calls_executed = False
 
 
+_RETRYABLE_STATUS = {429, 502, 503}  # rate-limited / temporarily unavailable
+
+
 def call_cloud_model(model, messages, tools):
     """One Ollama /api/chat call to a cloud model. Returns (content, tool_calls).
 
@@ -630,6 +633,10 @@ def call_cloud_model(model, messages, tools):
     on connection/timeout/EOF. A 2xx reply with no content and no tool calls is
     a valid empty reply, not an error. num_ctx is raised to mitigate the known
     cloud tool-call parsing/truncation issue on large contexts.
+
+    A 429/502/503 gets one retry (2s backoff) on the same model before this
+    raises — cheaper than falling through to the next model in the chain for
+    what's usually a transient blip.
     """
     payload = {
         "model": model,
@@ -638,11 +645,16 @@ def call_cloud_model(model, messages, tools):
         "stream": False,
         "options": {"num_ctx": 40960},
     }
-    try:
-        with CLOUD_SEMAPHORE:
-            r = httpx.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
-    except Exception as e:  # noqa: BLE001
-        raise CloudCallError("transport", None) from e
+    for attempt in range(2):
+        try:
+            with CLOUD_SEMAPHORE:
+                r = httpx.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
+        except Exception as e:  # noqa: BLE001
+            raise CloudCallError("transport", None) from e
+        if attempt == 0 and r.status_code in _RETRYABLE_STATUS:
+            time.sleep(2)
+            continue
+        break
     if r.status_code < 200 or r.status_code >= 300:
         raise CloudCallError("http", r.status_code)
     try:

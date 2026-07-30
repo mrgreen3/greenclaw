@@ -56,15 +56,24 @@ class NotifyTelegramTests(unittest.TestCase):
 class CallCloudModelTests(unittest.TestCase):
     def setUp(self):
         self._posts = []
+        self._response_queue = []
         def fake_post(url, json=None, timeout=None, **kw):
             self._posts.append({"url": url, "json": json})
-            resp = self._next_response
-            self._next_response = FakeResponse(200, {"message": {"content": "", "tool_calls": []}})
+            if self._response_queue:
+                resp = self._response_queue.pop(0)
+            else:
+                resp = self._next_response
+                self._next_response = FakeResponse(200, {"message": {"content": "", "tool_calls": []}})
             if isinstance(resp, Exception):
                 raise resp
             return resp
         gc.httpx.post = fake_post
         self._next_response = FakeResponse(200, {"message": {"content": "", "tool_calls": []}})
+        self._orig_sleep = gc.time.sleep
+        gc.time.sleep = lambda *_: None  # skip real backoff delay in tests
+
+    def tearDown(self):
+        gc.time.sleep = self._orig_sleep
 
     def _ollama_reply(self, content="", tool_calls=None):
         return FakeResponse(200, {"message": {"content": content, "tool_calls": tool_calls or []}})
@@ -85,17 +94,35 @@ class CallCloudModelTests(unittest.TestCase):
         self.assertEqual(tcs, [])
 
     def test_non_2xx_raises_http_error(self):
-        self._next_response = FakeResponse(502, {})
+        self._next_response = FakeResponse(500, {})  # not in the retryable set
         with self.assertRaises(gc.CloudCallError) as cm:
             gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
         self.assertEqual(cm.exception.reason, "http")
-        self.assertEqual(cm.exception.status, 502)
+        self.assertEqual(cm.exception.status, 500)
+        self.assertEqual(len(self._posts), 1)  # no retry for a non-retryable status
 
     def test_connection_error_raises_transport(self):
         self._next_response = RuntimeError("connection refused")
         with self.assertRaises(gc.CloudCallError) as cm:
             gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
         self.assertEqual(cm.exception.reason, "transport")
+        self.assertEqual(len(self._posts), 1)  # transport errors aren't retried here
+
+    def test_retryable_status_retries_once_then_succeeds(self):
+        self._response_queue = [
+            FakeResponse(503, {}),
+            self._ollama_reply(content="recovered"),
+        ]
+        content, tcs = gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
+        self.assertEqual(content, "recovered")
+        self.assertEqual(len(self._posts), 2)
+
+    def test_retryable_status_still_raises_after_retry_exhausted(self):
+        self._response_queue = [FakeResponse(429, {}), FakeResponse(429, {})]
+        with self.assertRaises(gc.CloudCallError) as cm:
+            gc.call_cloud_model("m", [{"role": "user", "content": "hi"}], [])
+        self.assertEqual(cm.exception.status, 429)
+        self.assertEqual(len(self._posts), 2)  # one retry, then give up
 
     def test_sends_num_ctx_options(self):
         self._next_response = self._ollama_reply(content="ok")
