@@ -51,6 +51,7 @@ from shared import (
     SCHEDULES_DIR,
     TASKS_DIR,
     parse_front_matter,
+    send_smtp,
 )
 
 # Cap run_shell output so a chatty command can't blow the local context or Telegram.
@@ -1246,7 +1247,6 @@ def handle_blog_post_email(text):
 
 def send_email(subject, body, attachment_path=None, html=None):
     """Send an email using EMAIL_* env vars. Optionally attach a file or send HTML. Returns error string or None."""
-    import smtplib
     import mimetypes
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -1293,15 +1293,9 @@ def send_email(subject, body, attachment_path=None, html=None):
             part.add_header("Content-Disposition", "attachment", filename=os.path.basename(attachment_path))
             msg.attach(part)
 
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
-                smtp.login(email_addr, email_pass)
-                smtp.sendmail(email_addr, to_addr, msg.as_string())
-        else:
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
-                smtp.starttls()
-                smtp.login(email_addr, email_pass)
-                smtp.sendmail(email_addr, to_addr, msg.as_string())
+        err = send_smtp(smtp_host, smtp_port, email_addr, email_pass, to_addr, msg)
+        if err:
+            return err
         print(f"[email] sent to {to_addr}" + (f" with attachment {os.path.basename(attachment_path)}" if attachment_path else ""))
     except Exception as e:  # noqa: BLE001
         return f"[email send error] {e}"
