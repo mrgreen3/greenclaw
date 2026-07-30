@@ -13,3 +13,5 @@ skills/*
 schedules/*
 !skills/paper-trade.py
 !schedules/paper-trade.md
+!skills/example.md
+!schedules/example.md
