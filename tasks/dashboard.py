@@ -23,6 +23,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -36,16 +37,19 @@ from urllib.parse import urlparse
 # ---------------------------------------------------------------------------
 
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _HERE)
+from shared import (  # noqa: E402
+    CC_LOG_FILE,
+    MEMORY_DIR,
+    MEMORY_SIZE_THRESHOLD,
+    NOTES_FILE,
+    SCHEDULE_STATE_FILE,
+    SCHEDULES_DIR,
+    TASKS_DIR,
+    parse_front_matter,
+)
 
-CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
-MEMORY_DIR = os.path.expanduser("~/.claude/projects/-home-mrgreen/memory")
-SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json")
-SCHEDULES_DIR = os.path.join(_HERE, "schedules")
-TASKS_DIR = os.path.join(_HERE, "tasks")
-NOTES_FILE = os.path.expanduser("~/notes.md")
 STATIC_DIR = os.path.join(_HERE, "static")
-
-MEMORY_SIZE_THRESHOLD = 50_000
 
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "mrgreen3/greenclaw")
 
@@ -247,20 +251,6 @@ def recent_cc_calls(limit=6):
     return out
 
 
-def _parse_front_matter(text):
-    """Minimal front-matter parser (mirrors greenclaw.parse_front_matter)."""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    meta = {}
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            return meta
-        if ":" in lines[i]:
-            k, v = lines[i].split(":", 1)
-            meta[k.strip()] = v.strip()
-    return {}
-
 
 def _days_str(raw):
     raw = (raw or "daily").strip().lower()
@@ -284,7 +274,7 @@ def scheduled_jobs():
             continue
         try:
             with open(os.path.join(SCHEDULES_DIR, fn)) as f:
-                meta = _parse_front_matter(f.read())
+                meta, _ = parse_front_matter(f.read())
         except Exception:
             continue
         schedule = (meta.get("schedule") or "").strip()
