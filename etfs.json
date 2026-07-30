@@ -1,19 +1,19 @@
 {
   "etfs": [
     {
-      "ticker": "VWRP",
+      "ticker": "VWRP.L",
       "trigger_pct": -2.0,
       "notional": 100.0,
       "description": "Vanguard FTSE World ETF"
     },
     {
-      "ticker": "VMID",
+      "ticker": "VMID.L",
       "trigger_pct": -2.5,
       "notional": 100.0,
       "description": "Vanguard UK Mid-Cap ETF"
     },
     {
-      "ticker": "VUKE",
+      "ticker": "VUKE.L",
       "trigger_pct": -1.5,
       "notional": 100.0,
       "description": "Vanguard FTSE UK All Share"
