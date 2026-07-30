@@ -24,7 +24,7 @@ Skills vs tasks vs schedules:
                   reply(text) sends the answer back on the same channel.
 
 LAN / sole-user box. Secrets in .env (TELEGRAM_*).
-Deps: pip install -r requirements.txt
+Deps: pip install httpx
 """
 
 __version__ = "0.5.1"
@@ -42,28 +42,28 @@ from datetime import datetime
 
 import httpx
 
-from shared import (
-    CC_LOG_FILE,
-    MEMORY_DIR,
-    MEMORY_SIZE_THRESHOLD,
-    NOTES_FILE,
-    SCHEDULE_STATE_FILE,
-    SCHEDULES_DIR,
-    TASKS_DIR,
-    parse_front_matter,
-    send_smtp,
-)
-
 # Cap run_shell output so a chatty command can't blow the local context or Telegram.
 SHELL_MAX_OUTPUT = 6000  # chars
+
+CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
 
 # Skills: markdown recipes loaded at boot (front matter only), bodies loaded on demand.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(_HERE, "skills")
 SKILLS_ALLOW = os.path.join(_HERE, "skills.allow")
 
+# Tasks: always-on connectors (Telegram, Signal, ...) loaded from tasks/*.py.
+TASKS_DIR = os.path.join(_HERE, "tasks")
+
+# Schedules: timed jobs loaded from schedules/*.md.
+SCHEDULES_DIR = os.path.join(_HERE, "schedules")
+SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json")
+
+NOTES_FILE = os.path.expanduser("~/notes.md")
 INBOX_ACTIVE_FLAG = os.path.expanduser("~/.local/share/greenclaw/inbox_active")
 
+MEMORY_DIR = os.path.expanduser("~/.claude/projects/-home-mrgreen/memory")
+MEMORY_SIZE_THRESHOLD = 50_000  # bytes — trigger CC compaction when exceeded
 MEMORY_COMPACTION_COOLDOWN = 86_400  # seconds (24h) between auto-compactions
 MEMORY_COMPACTION_STATE = os.path.expanduser("~/.local/share/greenclaw/memory_compaction.json")
 HEARTBEAT_FILE = os.path.expanduser("~/.local/share/greenclaw/heartbeat.jsonl")
@@ -90,7 +90,6 @@ GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
 GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "kimi-k2.7-code:cloud")
 CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
 CLOUD_MAX_STEPS = 8
-GC_CC_MODEL = os.environ.get("GC_CC_MODEL", "claude-haiku-4-5-20251001")
 # EMAIL_CC_KEYWORD read at call time in route() — .env loads after module-level constants
 
 
@@ -212,19 +211,12 @@ def _check_memory_threshold():
     except Exception:
         pass
     print(f"[memory] size threshold exceeded — requesting CC compaction")
-    result = ask_cc(
+    ask_cc(
         "Memory has grown large. Review all files in ~/.claude/projects/-home-mrgreen/memory/, "
         "consolidate overlapping entries, summarise older content into fewer files, and remove "
         "trivial or outdated facts. Preserve user preferences, recurring patterns, and active "
         "project context. Update MEMORY.md accordingly."
     )
-    if result.startswith("[error]"):
-        # Don't mark the cooldown on failure — retry on the next boot instead
-        # of silently sitting over threshold for a full cooldown period.
-        print(f"[memory] compaction failed, not marking cooldown: {result}")
-        notify_telegram(f"⚠️ memory compaction failed: {result}")
-        return
-    print("[memory] compaction finished")
     os.makedirs(os.path.dirname(MEMORY_COMPACTION_STATE), exist_ok=True)
     try:
         with open(MEMORY_COMPACTION_STATE, "w") as f:
@@ -244,8 +236,8 @@ def _prune_file(path, keep):
             with open(tmp, "w") as f:
                 f.writelines(lines[-keep:])
             os.replace(tmp, path)
-    except Exception as e:  # noqa: BLE001
-        print(f"[prune] {path}: {e}")
+    except Exception:
+        pass
 
 
 def log_heartbeat():
@@ -263,17 +255,17 @@ def _build_system():
     """Build the cloud model system prompt from real runtime facts gathered once at startup."""
     try:
         raw = subprocess.check_output(
-            ["grep", "PRETTY_NAME", "/etc/os-release"], text=True
+            "grep PRETTY_NAME /etc/os-release", shell=True, text=True
         ).strip()
         os_name = raw.split("=", 1)[-1].strip('"')
     except Exception:
         os_name = "Linux"
     try:
-        result = subprocess.run(
-            ["which", "pacman", "yay", "systemctl", "journalctl", "git", "python", "claude"],
-            capture_output=True, text=True,
-        )
-        tools = ", ".join(os.path.basename(t) for t in result.stdout.strip().splitlines() if t)
+        probe = subprocess.check_output(
+            "which pacman yay systemctl journalctl git python claude 2>/dev/null",
+            shell=True, text=True,
+        ).strip()
+        tools = ", ".join(os.path.basename(t) for t in probe.splitlines() if t)
     except Exception:
         tools = "standard Linux tools"
     return (
@@ -532,10 +524,6 @@ def report_version():
     return f"greenclaw {__version__}"
 
 
-def report_model():
-    return f"cloud primary: {GC_CLOUD_MODEL}\nfallback: {GC_CLOUD_FALLBACK}"
-
-
 STATIC_DIR = os.path.join(_HERE, "static")
 CHEAT_FILE = os.path.join(STATIC_DIR, "cheat.md")
 
@@ -629,9 +617,6 @@ class CloudCallError(Exception):
         self.tool_calls_executed = False
 
 
-_RETRYABLE_STATUS = {429, 502, 503}  # rate-limited / temporarily unavailable
-
-
 def call_cloud_model(model, messages, tools):
     """One Ollama /api/chat call to a cloud model. Returns (content, tool_calls).
 
@@ -640,10 +625,6 @@ def call_cloud_model(model, messages, tools):
     on connection/timeout/EOF. A 2xx reply with no content and no tool calls is
     a valid empty reply, not an error. num_ctx is raised to mitigate the known
     cloud tool-call parsing/truncation issue on large contexts.
-
-    A 429/502/503 gets one retry (2s backoff) on the same model before this
-    raises — cheaper than falling through to the next model in the chain for
-    what's usually a transient blip.
     """
     payload = {
         "model": model,
@@ -652,16 +633,11 @@ def call_cloud_model(model, messages, tools):
         "stream": False,
         "options": {"num_ctx": 40960},
     }
-    for attempt in range(2):
-        try:
-            with CLOUD_SEMAPHORE:
-                r = httpx.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
-        except Exception as e:  # noqa: BLE001
-            raise CloudCallError("transport", None) from e
-        if attempt == 0 and r.status_code in _RETRYABLE_STATUS:
-            time.sleep(2)
-            continue
-        break
+    try:
+        with CLOUD_SEMAPHORE:
+            r = httpx.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
+    except Exception as e:  # noqa: BLE001
+        raise CloudCallError("transport", None) from e
     if r.status_code < 200 or r.status_code >= 300:
         raise CloudCallError("http", r.status_code)
     try:
@@ -758,46 +734,6 @@ def _cloud_tool_loop(model, messages, tools):
     return "\n".join(p for p in text_parts if p.strip()) or "(no reply)"
 
 
-HERMES_BIN = os.path.expanduser("~/.local/bin/hermes")
-
-
-def converse_hermes(text, system_extra=None, chat_id=None, allow_shell=True):
-    """Delegate to Hermes Agent on localhost. Replaces converse_cloud as the
-    primary cloud path. Hermes does the tool loop, skills, memory, and
-    fallback chain. Falls back to converse_cloud if Hermes is unavailable.
-
-    system_extra: optional skill body prepended to the prompt.
-    chat_id: passed through for logging (Hermes manages its own history).
-    allow_shell: when False, Hermes is asked to withhold shell access (email
-        path — untrusted remote input).
-    """
-    prompt = text
-    if system_extra:
-        prompt = f"{system_extra}\n\n--- user request ---\n{text}"
-    if not allow_shell:
-        prompt = f"[RESTRICTED: no shell commands]\n{prompt}"
-    try:
-        result = subprocess.run(
-            [HERMES_BIN, "chat", "-q", prompt, "-Q"],
-            capture_output=True, text=True, timeout=120,
-            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
-        )
-        out = (result.stdout or "").strip()
-        if not out or result.returncode != 0:
-            err = (result.stderr or "").strip()
-            print(f"[hermes] no response (rc={result.returncode}): {err[:200]}")
-            return converse_cloud(text, system_extra=system_extra, chat_id=chat_id, allow_shell=allow_shell)
-        return out
-    except subprocess.TimeoutExpired:
-        print("[hermes] timed out (120s) — falling back to converse_cloud")
-        return converse_cloud(text, system_extra=system_extra, chat_id=chat_id, allow_shell=allow_shell)
-    except FileNotFoundError:
-        print("[hermes] binary not found — falling back to converse_cloud")
-        return converse_cloud(text, system_extra=system_extra, chat_id=chat_id, allow_shell=allow_shell)
-    except Exception as e:
-        print(f"[hermes] error: {e} — falling back to converse_cloud")
-        return converse_cloud(text, system_extra=system_extra, chat_id=chat_id, allow_shell=allow_shell)
-
 def converse_cloud(text, system_extra=None, chat_id=None, allow_shell=True):
     """Route to the cloud tier (Ollama :cloud models) with a tool-calling loop,
     a two-model fallback chain, Telegram notify-on-fallback, and CC escalation
@@ -864,6 +800,42 @@ def converse_cloud(text, system_extra=None, chat_id=None, allow_shell=True):
     return ask_cc(text, chat_id=chat_id)
 
 
+def converse_local_ondemand(text, chat_id=None):
+    """Fallback inference via local Qwen (Ollama). Starts Ollama on demand.
+    Loads/saves per-chat rolling history like ask_cc and converse_cloud."""
+    try:
+        _ensure_ollama()
+    except Exception as e:
+        return f"[qwen] could not start ollama: {e}"
+    mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
+    prefix = f"[{_tz_stamp()}]{mem_block}\n\n"
+    with _history_lock:
+        stored = list(_history.get(str(chat_id), [])) if chat_id is not None else []
+    messages = [{"role": m["role"], "content": m["content"]} for m in stored]
+    messages.append({"role": "user", "content": prefix + text})
+    try:
+        r = httpx.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
+            timeout=120,
+        )
+        reply = r.json()["message"]["content"].strip()
+    except Exception as e:
+        return f"[qwen] {e}"
+    if chat_id is not None:
+        key = str(chat_id)
+        with _history_lock:
+            existing = _history.get(key, [])
+            merged = existing + [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": reply},
+            ]
+            _history[key] = merged[-(HISTORY_MAX_TURNS * 2):]
+            _history_updated[key] = time.time()
+        save_history(key)
+    return reply
+
+
 def ask_cc(prompt, chat_id=None):
     """Hand the whole job to Claude Code headless, full autonomy."""
     if not os.path.exists(CC_BIN):
@@ -893,7 +865,7 @@ def ask_cc(prompt, chat_id=None):
         # its own sub-agents/tool calls, and killing only the direct child
         # (subprocess.run's default on TimeoutExpired) orphans the rest.
         p = subprocess.Popen(
-            [CC_BIN, "-p", prompt, "--model", GC_CC_MODEL, "--dangerously-skip-permissions"],
+            [CC_BIN, "-p", prompt, "--model", "claude-haiku-4-5-20251001", "--dangerously-skip-permissions"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=cc_env, start_new_session=True,
         )
@@ -939,6 +911,23 @@ def dispatch_tool(name, inp):
         err = send_email(inp.get("subject", ""), inp.get("body", ""), inp.get("attachment_path"))
         return err or "email sent"
     return f"[error] unknown tool {name}"
+
+
+def parse_front_matter(text):
+    """Split a skill file into (metadata dict, body). Front matter is a --- fenced
+    block of trivial key: value lines at the top. Returns ({}, text) if absent."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+    meta = {}
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            body = "\n".join(lines[i + 1:]).strip()
+            return meta, body
+        if ":" in lines[i]:
+            k, v = lines[i].split(":", 1)
+            meta[k.strip()] = v.strip()
+    return {}, text  # unterminated front matter -> treat as no metadata
 
 
 def load_skills():
@@ -1040,236 +1029,12 @@ def load_skills():
 
 
 # ---------------------------------------------------------------------------
-# BLOG POST EMAIL HANDLER
-# ---------------------------------------------------------------------------
-
-def parse_blog_email(subject, body):
-    """Parse email into blog post components.
-
-    Subject: "blog: post title" or "post: post title"
-    Body: optional YAML front matter (tags, description) then post content
-
-    Returns (slug, title, content, tags, description) or (None, ...) if not valid.
-    """
-    import re as _re
-
-    # Check for blog/post prefix
-    subj_lower = subject.lower().strip()
-    title = None
-    if subj_lower.startswith("blog:"):
-        title = subject[5:].strip()
-    elif subj_lower.startswith("post:"):
-        title = subject[5:].strip()
-
-    if not title:
-        return None, None, None, None, None
-
-    # Parse optional YAML front matter from body
-    # Format: tags: tag1, tag2 | description: one-liner
-    tags = []
-    description = ""
-    content = body
-
-    lines = body.split("\n")
-    front_matter_lines = []
-    content_start_idx = 0
-
-    for i, line in enumerate(lines):
-        stripped = line.strip().lower()
-        if stripped.startswith("tags:"):
-            tags_part = line.split(":", 1)[1].strip()
-            tags = [t.strip() for t in tags_part.split(",") if t.strip()]
-            front_matter_lines.append(i)
-        elif stripped.startswith("description:"):
-            description = line.split(":", 1)[1].strip()
-            front_matter_lines.append(i)
-        elif front_matter_lines and stripped == "":
-            # Empty line after front matter marks the start of content
-            content_start_idx = i + 1
-            break
-        elif not front_matter_lines:
-            # First non-front-matter line
-            content_start_idx = i
-            break
-
-    if content_start_idx > 0:
-        content = "\n".join(lines[content_start_idx:]).strip()
-
-    # Generate slug from title: lowercase, spaces->hyphens, remove special chars
-    slug = _re.sub(r'[^a-z0-9\s-]', '', title.lower())
-    slug = _re.sub(r'\s+', '-', slug).strip("-")
-
-    # Add date prefix if not present
-    from datetime import datetime
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    if not slug.startswith(date_str):
-        slug = f"{date_str}-{slug}"
-
-    return slug, title, content, tags, description
-
-
-def create_blog_post(slug, title, content, tags=None, description=""):
-    """Create a Zola blog post at ~/blog/content/posts/{slug}.md
-
-    Returns (success: bool, message: str, live_url: str or None)
-    """
-    import subprocess
-    from datetime import datetime
-
-    blog_dir = os.path.expanduser("~/blog")
-    posts_dir = os.path.join(blog_dir, "content", "posts")
-    post_file = os.path.join(posts_dir, f"{slug}.md")
-
-    # Check if post already exists
-    if os.path.exists(post_file):
-        return False, f"Post already exists: {slug}", None
-
-    # Ensure directory exists
-    os.makedirs(posts_dir, exist_ok=True)
-
-    # Build TOML front matter
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    tags = tags or []
-    if not isinstance(tags, list):
-        tags = [tags] if tags else []
-
-    tags_str = ', '.join(f'"{tag}"' for tag in tags) if tags else ""
-
-    # Use greenclaw tag if no tags specified
-    if not tags_str:
-        tags_str = '"greenclaw"'
-
-    if not description:
-        description = title  # Fallback to title if no description
-
-    front_matter = f'''+++
-title = "{title.replace('"', '\\"')}"
-date = {date_str}
-description = "{description.replace('"', '\\"')}"
-
-[taxonomies]
-tags = [{tags_str}]
-+++
-
-{content.strip()}
-
->_
-'''
-
-    # Write post file
-    try:
-        with open(post_file, "w") as f:
-            f.write(front_matter)
-    except Exception as e:
-        return False, f"Failed to write post: {e}", None
-
-    # Commit and push (delegate to git)
-    try:
-        # Change to blog directory and commit
-        result = subprocess.run(
-            ["git", "add", post_file],
-            cwd=blog_dir,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode != 0:
-            return False, f"Git add failed: {result.stderr}", None
-
-        result = subprocess.run(
-            ["git", "commit", "-m", f"add: {slug}"],
-            cwd=blog_dir,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode != 0:
-            return False, f"Git commit failed: {result.stderr}", None
-
-        # Deploy using deploy.sh
-        deploy_script = os.path.join(blog_dir, "deploy.sh")
-        if os.path.exists(deploy_script):
-            result = subprocess.run(
-                ["bash", deploy_script],
-                cwd=blog_dir,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode != 0:
-                return False, f"Deploy failed: {result.stderr}", None
-    except subprocess.TimeoutExpired:
-        return False, "Git/deploy timeout", None
-    except Exception as e:
-        return False, f"Git/deploy error: {e}", None
-
-    # Build live URL (extract from blog config or use default)
-    try:
-        config_path = os.path.join(blog_dir, "config.toml")
-        with open(config_path) as f:
-            import re as _re
-            match = _re.search(r'base_url\s*=\s*["\']([^"\']+)["\']', f.read())
-            base_url = match.group(1) if match else "https://mrgreen.blog"
-    except Exception:
-        base_url = "https://mrgreen.blog"
-
-    live_url = f"{base_url.rstrip('/')}/{slug}/"
-
-    return True, f"Post created: {slug}", live_url
-
-
-def handle_blog_post_email(text):
-    """Process blog post emails.
-
-    Format:
-      Subject: blog: My Post Title  (or "post: ...")
-      Body: optional front matter, then post content
-
-    Returns (success: bool, message: str)
-    """
-    import re
-
-    # Parse the email format
-    if not text.startswith("[email subject:"):
-        return False, "Not an email"
-
-    lines = text.split("\n", 1)
-    subject_line = lines[0]
-    body = lines[1] if len(lines) > 1 else ""
-
-    # Extract subject
-    m = re.match(r'\[email subject:\s*(.*?)\]', subject_line)
-    if not m:
-        return False, "Could not parse email subject"
-    subject = m.group(1).strip()
-
-    # Strip quoted reply lines
-    clean_body = "\n".join(l for l in body.splitlines() if not l.startswith(">")).strip()
-
-    # Parse blog email
-    slug, title, content, tags, description = parse_blog_email(subject, clean_body)
-
-    if not slug:
-        return False, "Email subject must start with 'blog:' or 'post:'"
-
-    if not content.strip():
-        return False, "Email body cannot be empty"
-
-    # Create the post
-    success, message, live_url = create_blog_post(slug, title, content, tags, description)
-
-    if success and live_url:
-        return True, f"✓ Post published: {live_url}"
-    else:
-        return success, message
-
-
-# ---------------------------------------------------------------------------
 # EMAIL SEND UTILITY
 # ---------------------------------------------------------------------------
 
-def send_email(subject, body, attachment_path=None, html=None):
-    """Send an email using EMAIL_* env vars. Optionally attach a file or send HTML. Returns error string or None."""
+def send_email(subject, body, attachment_path=None):
+    """Send an email using EMAIL_* env vars. Optionally attach a file. Returns error string or None."""
+    import smtplib
     import mimetypes
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -1287,23 +1052,11 @@ def send_email(subject, body, attachment_path=None, html=None):
         return "[email] EMAIL_SMTP_HOST, EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_TRUSTED_SENDERS required"
 
     try:
-        if html:
-            # multipart/alternative: plain text fallback + HTML part
-            alt = MIMEMultipart("alternative")
-            alt.attach(MIMEText(body, "plain"))
-            alt.attach(MIMEText(html, "html"))
-            if attachment_path:
-                msg = MIMEMultipart("mixed")
-                msg.attach(alt)
-            else:
-                msg = alt
-        else:
-            msg = MIMEMultipart()
-            msg.attach(MIMEText(body, "plain"))
-
+        msg = MIMEMultipart()
         msg["Subject"] = subject
         msg["From"] = email_addr
         msg["To"] = to_addr
+        msg.attach(MIMEText(body, "plain"))
 
         if attachment_path:
             attachment_path = os.path.expanduser(attachment_path)
@@ -1316,9 +1069,15 @@ def send_email(subject, body, attachment_path=None, html=None):
             part.add_header("Content-Disposition", "attachment", filename=os.path.basename(attachment_path))
             msg.attach(part)
 
-        err = send_smtp(smtp_host, smtp_port, email_addr, email_pass, to_addr, msg)
-        if err:
-            return err
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
+                smtp.login(email_addr, email_pass)
+                smtp.sendmail(email_addr, to_addr, msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+                smtp.starttls()
+                smtp.login(email_addr, email_pass)
+                smtp.sendmail(email_addr, to_addr, msg.as_string())
         print(f"[email] sent to {to_addr}" + (f" with attachment {os.path.basename(attachment_path)}" if attachment_path else ""))
     except Exception as e:  # noqa: BLE001
         return f"[email send error] {e}"
@@ -1523,13 +1282,7 @@ def start_scheduler(reply_fn):
                 state[sched["name"]] = now.isoformat()
                 _save_schedule_state(state)
                 if sched.get("output") == "email":
-                    stripped = result.strip()
-                    html_body = stripped if stripped.startswith("<") else None
-                    plain_body = stripped if not html_body else "\n".join(
-                        line for line in __import__("re").sub(r"<[^>]+>", "", stripped).splitlines()
-                        if line.strip()
-                    )
-                    err = send_email(f"⏰ {sched['name']}", plain_body, html=html_body)
+                    err = send_email(f"⏰ {sched['name']}", result)
                     if err:
                         reply_fn(err)
                 else:
@@ -1570,43 +1323,30 @@ def run_skill(skill, text):
         return f"[skill error] could not read {skill['path']}: {e}"
     prompt = f"{body}\n\n--- user request ---\n{arg}" if arg else body
     if skill.get("exposes") == "gg":
-        return converse_hermes(prompt)
+        return converse_cloud(prompt)
     return ask_cc(prompt)
 
 
 def route(text, chat_id=None):
     """Shared routing logic for every front end (terminal and all tasks).
 
-    CC-first: with no prefix, Claude Code handles it; if CC errors, the cloud
-    model (converse_cloud) is used as a fallback. `cc ` forces Claude Code;
-    `gg ` forces the cloud model. chat_id is passed through for per-chat
-    history tracking.
+    CC-first: with no prefix, Claude Code handles it; if CC errors, the local
+    Qwen model is used as a fallback. `cc ` forces Claude Code; `gg ` forces
+    the cloud model. chat_id is passed through for per-chat history tracking.
     """
     # Email messages arrive as "[email subject: ...]\n{body}" — strip the header
     # for prefix routing but keep it for inference context.
     prefix_text = text
     is_email = text.startswith("[email subject:")
     if is_email:
-        import re as _re
         lines = text.split("\n", 1)
-        subject_line = lines[0]
-        body = lines[1] if len(lines) > 1 else ""
-        # Strip quoted reply lines (lines starting with >) — Gmail threads include them
-        clean_body = "\n".join(l for l in body.splitlines() if not l.startswith(">")).strip()
-        if clean_body:
-            prefix_text = clean_body
-        else:
-            # Empty or all-quoted body — route on subject
-            m = _re.match(r'\[email subject:\s*(.*?)\]', subject_line)
-            prefix_text = m.group(1).strip() if m else text
+        prefix_text = lines[1].strip() if len(lines) > 1 else text
 
     text_lower = prefix_text.lower()
     if text_lower in ("usage", "calls"):
         return report_usage()
     if text_lower in ("/version", "version"):
         return report_version()
-    if text_lower in ("/model", "model"):
-        return report_model()
     if text_lower in ("/cheat", "cheat"):
         return report_cheat()
     if text_lower in ("/watch", "watch"):
@@ -1634,18 +1374,8 @@ def route(text, chat_id=None):
     if text_lower.startswith("cc "):
         return ask_cc(prefix_text[3:].strip())
     if text_lower.startswith("gg "):
-        return converse_hermes(prefix_text[3:].strip(), chat_id=chat_id)
+        return converse_cloud(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
-        # Check if this is a blog post email (subject: "blog: ..." or "post: ...")
-        import re as _re
-        m = _re.match(r'\[email subject:\s*(.*?)\]', text.split("\n", 1)[0])
-        subj = m.group(1).strip() if m else ""
-        subj_lower = subj.lower()
-        if subj_lower.startswith("blog:") or subj_lower.startswith("post:"):
-            print("[route] blog post email detected")
-            success, message = handle_blog_post_email(text)
-            return message  # Returns the success/error message
-
         # Trusted sender already verified in tasks/email.py. If EMAIL_CC_KEYWORD
         # is set and present in the body, escalate to CC (full autonomy).
         # Without the keyword, fall back to restricted cloud path (no run_shell,
@@ -1656,13 +1386,13 @@ def route(text, chat_id=None):
             result = ask_cc(text, chat_id=chat_id)
             if result.startswith("[error]"):
                 print(f"[route] CC failed ({result}), falling back to glm-5.2")
-                return converse_hermes(text, chat_id=chat_id)
+                return converse_cloud(text, chat_id=chat_id)
             return result
-        return converse_hermes(text, chat_id=chat_id, allow_shell=False)
+        return converse_cloud(text, chat_id=chat_id, allow_shell=False)
     result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
     if result.startswith("[error]"):
         print(f"[route] CC failed ({result}), falling back to glm-5.2")
-        return converse_hermes(text, chat_id=chat_id)
+        return converse_cloud(text, chat_id=chat_id)
     return result
 
 
@@ -1758,12 +1488,6 @@ def run_terminal():
 
 
 def main():
-    # systemd sends SIGTERM on stop/restart. Without a handler, the default
-    # action kills the process immediately mid-syscall — any in-flight file
-    # write skips its `finally`/context-manager cleanup, and a CC subprocess
-    # can be orphaned running under init instead of dying with its parent.
-    # Raising SystemExit instead unwinds normally through those blocks.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     load_env()
     load_history()
     load_skills()

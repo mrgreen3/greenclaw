@@ -300,6 +300,7 @@ class NoGeminiReferencesTests(unittest.TestCase):
             "call_cloud_model": gc.call_cloud_model,
             "notify_telegram": gc.notify_telegram,
             "save_history": gc.save_history,
+            "converse_hermes": gc.converse_hermes,
         }
         self._saved_history = dict(gc._history)
         gc.save_history = lambda key: None
@@ -310,6 +311,7 @@ class NoGeminiReferencesTests(unittest.TestCase):
         gc.call_cloud_model = self._saved["call_cloud_model"]
         gc.notify_telegram = self._saved["notify_telegram"]
         gc.save_history = self._saved["save_history"]
+        gc.converse_hermes = self._saved["converse_hermes"]
         gc._history.clear()
         gc._history.update(self._saved_history)
 
@@ -329,6 +331,9 @@ class NoGeminiReferencesTests(unittest.TestCase):
             seen["tools"] = tools
             return ("email ok", [])
         gc.call_cloud_model = spy
+        # Route now calls converse_hermes; redirect it to converse_cloud
+        # so the mocked call_cloud_model spy captures the tool selection.
+        gc.converse_hermes = lambda text, **kw: gc.converse_cloud(text, **kw)
         out = gc.route("[email subject: hi]\nplease summarize", chat_id="3")
         self.assertEqual(out, "email ok")
         names = sorted(t["function"]["name"] for t in seen["tools"])
@@ -345,6 +350,9 @@ class NoGeminiReferencesTests(unittest.TestCase):
             seen["tools"] = tools
             return ("gg ok", [])
         gc.call_cloud_model = spy
+        # Route now calls converse_hermes; redirect it to converse_cloud
+        # so the mocked call_cloud_model spy captures the tool selection.
+        gc.converse_hermes = lambda text, **kw: gc.converse_cloud(text, **kw)
         out = gc.route("gg do thing", chat_id="3")
         self.assertEqual(out, "gg ok")
         names = sorted(t["function"]["name"] for t in seen["tools"])
