@@ -805,42 +805,6 @@ def converse_cloud(text, system_extra=None, chat_id=None, allow_shell=True):
     return ask_cc(text, chat_id=chat_id)
 
 
-def converse_local_ondemand(text, chat_id=None):
-    """Fallback inference via local Qwen (Ollama). Starts Ollama on demand.
-    Loads/saves per-chat rolling history like ask_cc and converse_cloud."""
-    try:
-        _ensure_ollama()
-    except Exception as e:
-        return f"[qwen] could not start ollama: {e}"
-    mem_block = f"\n\n--- long-term memory ---\n{_memory_context}" if _memory_context else ""
-    prefix = f"[{_tz_stamp()}]{mem_block}\n\n"
-    with _history_lock:
-        stored = list(_history.get(str(chat_id), [])) if chat_id is not None else []
-    messages = [{"role": m["role"], "content": m["content"]} for m in stored]
-    messages.append({"role": "user", "content": prefix + text})
-    try:
-        r = httpx.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
-            timeout=120,
-        )
-        reply = r.json()["message"]["content"].strip()
-    except Exception as e:
-        return f"[qwen] {e}"
-    if chat_id is not None:
-        key = str(chat_id)
-        with _history_lock:
-            existing = _history.get(key, [])
-            merged = existing + [
-                {"role": "user", "content": text},
-                {"role": "assistant", "content": reply},
-            ]
-            _history[key] = merged[-(HISTORY_MAX_TURNS * 2):]
-            _history_updated[key] = time.time()
-        save_history(key)
-    return reply
-
-
 def ask_cc(prompt, chat_id=None):
     """Hand the whole job to Claude Code headless, full autonomy."""
     if not os.path.exists(CC_BIN):
@@ -1554,9 +1518,10 @@ def run_skill(skill, text):
 def route(text, chat_id=None):
     """Shared routing logic for every front end (terminal and all tasks).
 
-    CC-first: with no prefix, Claude Code handles it; if CC errors, the local
-    Qwen model is used as a fallback. `cc ` forces Claude Code; `gg ` forces
-    the cloud model. chat_id is passed through for per-chat history tracking.
+    CC-first: with no prefix, Claude Code handles it; if CC errors, the cloud
+    model (converse_cloud) is used as a fallback. `cc ` forces Claude Code;
+    `gg ` forces the cloud model. chat_id is passed through for per-chat
+    history tracking.
     """
     # Email messages arrive as "[email subject: ...]\n{body}" — strip the header
     # for prefix routing but keep it for inference context.
