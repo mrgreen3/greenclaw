@@ -24,7 +24,7 @@ Skills vs tasks vs schedules:
                   reply(text) sends the answer back on the same channel.
 
 LAN / sole-user box. Secrets in .env (TELEGRAM_*).
-Deps: pip install httpx
+Deps: pip install -r requirements.txt
 """
 
 __version__ = "0.5.1"

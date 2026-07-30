@@ -6,7 +6,7 @@
 
 A personal Telegram→AI bridge running on a low-power home server. Send a message, get a capable AI response — no GPU, no cloud subscription beyond what you already have, no waste.
 
-Single Python file. Lean, auditable, yours.
+Single-file gateway. Task connectors and skills drop in alongside.
 
 ---
 
@@ -24,12 +24,19 @@ It can run shell commands on the server, take notes, answer questions, and hand 
 
 | Prefix | Goes to | Cost |
 |--------|---------|------|
-| _(anything)_ | Claude Code (default) | Pro subscription (no per-token billing) |
+| _(anything)_ | Claude Code (default); falls back to the cloud model if CC errors | Pro subscription (no per-token billing) |
 | `cc <prompt>` | Forces Claude Code CLI via OAuth | Pro subscription (no per-token billing) |
 | `gg <prompt>` | Forces the cloud model (glm-5.2:cloud) | Ollama Cloud (metered) |
 | `/<trigger> …` | A skill recipe (see [Skills](#skills)) | Free or subscription, per skill |
 | `/cheat` | Built-in cheat sheet — prefixes, commands, loaded skills | — |
 | `usage` / `calls` | CC invocation count today | — |
+| `/version` / `version` | greenclaw version | — |
+| `/model` / `model` | Cloud model info (primary + fallback) | — |
+| `/memory` / `memory stats` | Memory vault stats | — |
+| `/watch` | Scheduled jobs and when they last ran | — |
+| `/inbox on` / `/inbox off` | Toggle the GitHub inbox watcher | — |
+| `/regreen` | Restart the bot (`systemctl --user restart greenclaw.service`) | — |
+| `remember <text>` | Save a fact to memory | — |
 
 **Default path** (no prefix) goes straight to Claude Code via your claude.ai Pro OAuth session. For lighter tasks where you want a faster response, use `gg` to route to the cloud model (glm-5.2:cloud) instead.
 
@@ -129,7 +136,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 
 **No Anthropic API key path**: Claude Code runs via an OAuth Pro session, not a metered Anthropic API key — no per-token spend on the heavy-work path, no surprise bills from CC usage. The lightweight cloud tier (`glm-5.2:cloud`) is metered via Ollama Cloud; cost there is bounded by the small-model routing.
 
-**Nothing runs on a timer**: GreenClaw never wakes the cloud model on a schedule. There's no background polling of your inbox, no cron job quietly burning through your subscription while you sleep. Claude Code runs only when a message — or a skill you triggered — actually needs it. Want your mail summarised? Ask (`/mail`), and it happens then, not every hour whether you're looking or not.
+**Schedules are opt-in**: GreenClaw doesn't wake the cloud model on a schedule by default — there's no cron job quietly burning through your subscription unless you add one yourself. `schedules/*.md` timed jobs exist (`/watch` lists them; `paper-trade` runs weekdays at 16:30 UTC) but they're something you deliberately add, not baseline behaviour. Claude Code otherwise runs only when a message — or a skill you triggered — actually needs it. Want your mail summarised? Ask (`/mail`), and it happens then, not every hour whether you're looking or not.
 
 **The fix that started it**: An early version passed the Anthropic API key to Claude Code subprocesses, causing OAuth-authed Claude Code to fall back to billing API credits. That was caught, fixed, and then the metered path removed entirely. Claude Code now runs in a clean environment without the API key, ensuring it always uses the OAuth session.
 
@@ -159,7 +166,7 @@ GreenClaw was designed around a simple principle: **don't burn resources you don
 git clone git@github.com:mrgreen3/greenclaw.git
 cd greenclaw
 python -m venv .venv && source .venv/bin/activate
-pip install httpx
+pip install -r requirements.txt
 cp .env.example .env   # fill in your keys
 ```
 
@@ -171,6 +178,11 @@ TELEGRAM_CHAT_ID=...   # your Telegram user ID — locks the bot to you only
 GC_CLOUD_MODEL=glm-5.2:cloud       # primary cloud model
 GC_CLOUD_FALLBACK=kimi-k2.7-code:cloud  # secondary; auto-escalates to CC if both fail
 ```
+
+Those four are all that's required to run the core bot. `.env.example` has
+the full list, including optional ones for the email task (`EMAIL_*`),
+dashboard (`DASHBOARD_*`), GitHub inbox watcher (`GITHUB_*`,
+`GREENCLAW_GH_TOKEN`), and the paper-trading skill (`ALPHA_VANTAGE_API_KEY`).
 
 To find your chat ID: leave `TELEGRAM_CHAT_ID` blank, start the bot, message it — it will report your ID. Set it and restart.
 
@@ -210,12 +222,22 @@ systemctl --user restart greenclaw.service
 
 | File | Purpose |
 |------|---------|
-| `greenclaw.py` | The gateway — single file, intentional |
-| `skills/` | Skill recipes (`*.md`) — add capabilities here, no code |
+| `greenclaw.py` | The gateway — routing, skills/tasks/schedules loading, cloud/CC calls |
+| `shared.py` | Constants and pure helpers shared with `tasks/dashboard.py` |
+| `skills/` | Skill recipes (`*.md`) and Python skills (`*.py`) — add capabilities here |
 | `skills.allow` | Arms `locked` skills — one name per line |
-| `tasks/` | Always-on connectors (`*.py`) — Telegram and any others |
+| `tasks/` | Always-on connectors (`*.py`) — Telegram, email, dashboard, GitHub inbox |
+| `tasks/telegram.py` | Telegram Bot API long-polling connector |
+| `tasks/email.py` | IMAP/SMTP email connector |
+| `tasks/dashboard.py` | Read-only web status page |
+| `tasks/github_inbox.py` | Watches a GitHub repo for actionable issues |
+| `schedules/` | Timed jobs (`*.md`) — when to run a skill automatically |
 | `static/` | Editable static text — `cheat.md` lives here |
+| `docs/` | Design notes and skill-specific docs (e.g. paper trading) |
+| `tests/` | Test suite (`python -m unittest discover -s tests`) |
+| `etfs.json` | ETF config for the paper-trade skill |
 | `.env` | Secrets (chmod 600) — never commit this |
+| `greenclaw.service` | systemd user service unit |
 | `cc_calls.jsonl` | Claude Code invocation log (gitignored) |
 | `~/notes.md` | Notes written via `add_note` tool |
 
@@ -240,7 +262,7 @@ Done so far:
 - [Skills](#skills) — static gateway, markdown recipes, explicit triggers, lock file
 - [Tasks](#tasks) — pluggable always-on connectors (Telegram today, room for more)
 - Built-in `/cheat` cheat sheet driven by `static/cheat.md`
-- Per-chat rolling history — the last 10 exchanges per conversation are preserved; context survives within a session (in-memory; cleared on restart — see [#7](https://github.com/mrgreen3/greenclaw/issues/7))
+- Per-chat rolling history — the last 10 exchanges per conversation are preserved; persisted to disk (`~/.local/share/greenclaw/history.json`) and reloaded on restart, with a 7-day TTL on stale entries
 - Telegram typing indicator — `typing…` sent before dispatching so the chat feels live during longer calls
 - Runtime-aware system prompt — at startup, `_build_system()` reads `/etc/os-release` and probes installed tools via `which`, so the AI knows the actual OS and what's available without being told each time
 - System management via natural language — common sysadmin phrases (`update system`, `disk space`, `what's running`) are handled immediately via `run_shell` without asking for clarification; the cloud model knows it's on Arch and uses `pacman`, not `apt`
@@ -250,3 +272,9 @@ Done so far:
 ## Name
 
 GreenClaw: low footprint, runs quiet, shows up when needed. The green is in the approach — not a badge, just a design constraint.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
