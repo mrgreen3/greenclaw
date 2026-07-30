@@ -42,28 +42,27 @@ from datetime import datetime
 
 import httpx
 
+from shared import (
+    CC_LOG_FILE,
+    MEMORY_DIR,
+    MEMORY_SIZE_THRESHOLD,
+    NOTES_FILE,
+    SCHEDULE_STATE_FILE,
+    SCHEDULES_DIR,
+    TASKS_DIR,
+    parse_front_matter,
+)
+
 # Cap run_shell output so a chatty command can't blow the local context or Telegram.
 SHELL_MAX_OUTPUT = 6000  # chars
-
-CC_LOG_FILE = os.path.expanduser("~/greenclaw/cc_calls.jsonl")
 
 # Skills: markdown recipes loaded at boot (front matter only), bodies loaded on demand.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(_HERE, "skills")
 SKILLS_ALLOW = os.path.join(_HERE, "skills.allow")
 
-# Tasks: always-on connectors (Telegram, Signal, ...) loaded from tasks/*.py.
-TASKS_DIR = os.path.join(_HERE, "tasks")
-
-# Schedules: timed jobs loaded from schedules/*.md.
-SCHEDULES_DIR = os.path.join(_HERE, "schedules")
-SCHEDULE_STATE_FILE = os.path.expanduser("~/.local/share/greenclaw/schedule.json")
-
-NOTES_FILE = os.path.expanduser("~/notes.md")
 INBOX_ACTIVE_FLAG = os.path.expanduser("~/.local/share/greenclaw/inbox_active")
 
-MEMORY_DIR = os.path.expanduser("~/.claude/projects/-home-mrgreen/memory")
-MEMORY_SIZE_THRESHOLD = 50_000  # bytes — trigger CC compaction when exceeded
 MEMORY_COMPACTION_COOLDOWN = 86_400  # seconds (24h) between auto-compactions
 MEMORY_COMPACTION_STATE = os.path.expanduser("~/.local/share/greenclaw/memory_compaction.json")
 HEARTBEAT_FILE = os.path.expanduser("~/.local/share/greenclaw/heartbeat.jsonl")
@@ -916,23 +915,6 @@ def dispatch_tool(name, inp):
         err = send_email(inp.get("subject", ""), inp.get("body", ""), inp.get("attachment_path"))
         return err or "email sent"
     return f"[error] unknown tool {name}"
-
-
-def parse_front_matter(text):
-    """Split a skill file into (metadata dict, body). Front matter is a --- fenced
-    block of trivial key: value lines at the top. Returns ({}, text) if absent."""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}, text
-    meta = {}
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            body = "\n".join(lines[i + 1:]).strip()
-            return meta, body
-        if ":" in lines[i]:
-            k, v = lines[i].split(":", 1)
-            meta[k.strip()] = v.strip()
-    return {}, text  # unterminated front matter -> treat as no metadata
 
 
 def load_skills():

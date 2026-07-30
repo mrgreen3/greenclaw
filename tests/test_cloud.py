@@ -7,6 +7,7 @@ from pathlib import Path
 # Load greenclaw.py as a module without importing it as a package.
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
+sys.path.insert(0, str(_ROOT))  # greenclaw.py imports shared.py from repo root
 spec = importlib.util.spec_from_file_location("greenclaw", _ROOT / "greenclaw.py")
 gc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gc)
