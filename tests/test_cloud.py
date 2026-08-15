@@ -340,7 +340,7 @@ class NoGeminiReferencesTests(unittest.TestCase):
         self.assertNotIn("run_shell", names)
         self.assertNotIn("delegate_to_cc", names)
 
-    def test_route_gg_uses_cloud_with_shell(self):
+    def test_route_default_uses_cloud_with_shell(self):
         gc._ensure_ollama = lambda: None
         gc._memory_context = ""
         gc._history.clear()
@@ -348,13 +348,13 @@ class NoGeminiReferencesTests(unittest.TestCase):
         seen = {}
         def spy(model, messages, tools):
             seen["tools"] = tools
-            return ("gg ok", [])
+            return ("cloud ok", [])
         gc.call_cloud_model = spy
         # Route now calls converse_hermes; redirect it to converse_cloud
         # so the mocked call_cloud_model spy captures the tool selection.
         gc.converse_hermes = lambda text, **kw: gc.converse_cloud(text, **kw)
-        out = gc.route("gg do thing", chat_id="3")
-        self.assertEqual(out, "gg ok")
+        out = gc.route("do thing", chat_id="3")
+        self.assertEqual(out, "cloud ok")
         names = sorted(t["function"]["name"] for t in seen["tools"])
         self.assertIn("run_shell", names)
 
