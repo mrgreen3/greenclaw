@@ -6,9 +6,8 @@ Two front ends, one core:
   python greenclaw.py --tasks     run always-on tasks from tasks/ (Telegram etc.)
 
 Per-message channels:
-  <prompt>               -> Claude Code (default)
+  <prompt>               -> cloud model (default; escalates to CC when needed)
   cc <prompt>            -> Claude Code CLI (explicit)
-  gg <prompt>            -> cloud model (glm-5.2:cloud, force)
   /<trigger> ...         -> a skill recipe from skills/
   /watch                 -> show scheduled jobs and when they last ran
   usage / calls          -> CC invocation count today
@@ -88,7 +87,8 @@ OLLAMA_IDLE_TIMEOUT = 600  # seconds before auto-shutdown after last use
 CLOUD_SEMAPHORE = threading.Semaphore(3)  # Ollama Cloud: 3 concurrent models
 GC_CLOUD_MODEL = os.environ.get("GC_CLOUD_MODEL", "glm-5.2:cloud")
 GC_CLOUD_FALLBACK = os.environ.get("GC_CLOUD_FALLBACK", "kimi-k2.7-code:cloud")
-CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK]
+GC_CLOUD_FALLBACK_2 = os.environ.get("GC_CLOUD_FALLBACK_2", "kimi-k3:cloud")
+CLOUD_CHAIN = [GC_CLOUD_MODEL, GC_CLOUD_FALLBACK, GC_CLOUD_FALLBACK_2]
 CLOUD_MAX_STEPS = 8
 GC_CC_MODEL = os.environ.get("GC_CC_MODEL", "claude-haiku-4-5-20251001")
 # EMAIL_CC_KEYWORD read at call time in route() — .env loads after module-level constants
@@ -533,7 +533,10 @@ def report_version():
 
 
 def report_model():
-    return f"cloud primary: {GC_CLOUD_MODEL}\nfallback: {GC_CLOUD_FALLBACK}"
+    lines = [f"cloud primary: {GC_CLOUD_MODEL}"]
+    for i, m in enumerate(CLOUD_CHAIN[1:], 1):
+        lines.append(f"fallback {i}: {m}")
+    return "\n".join(lines)
 
 
 STATIC_DIR = os.path.join(_HERE, "static")
@@ -1577,10 +1580,9 @@ def run_skill(skill, text):
 def route(text, chat_id=None):
     """Shared routing logic for every front end (terminal and all tasks).
 
-    CC-first: with no prefix, Claude Code handles it; if CC errors, the cloud
-    model (converse_cloud) is used as a fallback. `cc ` forces Claude Code;
-    `gg ` forces the cloud model. chat_id is passed through for per-chat
-    history tracking.
+    Cloud-first: with no prefix, the cloud model (via Hermes) handles it and
+    decides on its own when to escalate to CC via delegate_to_cc. `cc ` forces
+    Claude Code. chat_id is passed through for per-chat history tracking.
     """
     # Email messages arrive as "[email subject: ...]\n{body}" — strip the header
     # for prefix routing but keep it for inference context.
@@ -1633,9 +1635,8 @@ def route(text, chat_id=None):
         return save_memory(text[9:].strip())
     if text_lower.startswith("cc "):
         return ask_cc(prefix_text[3:].strip())
-    if text_lower.startswith("gg "):
-        return converse_hermes(prefix_text[3:].strip(), chat_id=chat_id)
     if is_email:
+        # NOTE: email path falls through to the default (cloud-first) below.
         # Check if this is a blog post email (subject: "blog: ..." or "post: ...")
         import re as _re
         m = _re.match(r'\[email subject:\s*(.*?)\]', text.split("\n", 1)[0])
@@ -1659,10 +1660,12 @@ def route(text, chat_id=None):
                 return converse_hermes(text, chat_id=chat_id)
             return result
         return converse_hermes(text, chat_id=chat_id, allow_shell=False)
-    result = ask_cc(text, chat_id=chat_id)  # Telegram default: CC
+    # Default: cloud-first (Hermes → cloud chain → CC escalation via delegate_to_cc).
+    # The cloud model decides when to escalate to CC on its own.
+    result = converse_hermes(text, chat_id=chat_id)
     if result.startswith("[error]"):
-        print(f"[route] CC failed ({result}), falling back to glm-5.2")
-        return converse_hermes(text, chat_id=chat_id)
+        print(f"[route] cloud failed ({result}), falling back to CC")
+        return ask_cc(text, chat_id=chat_id)
     return result
 
 
@@ -1744,7 +1747,7 @@ def keepalive(threads):
 
 def run_terminal():
     print("router ready — the cloud model handles messages and calls Claude Code when needed. "
-          "Prefix `cc ` to force Claude Code, `gg ` to force the cloud model. Ctrl-D to quit.\n")
+          "Prefix `cc ` to force Claude Code. Ctrl-D to quit.\n")
     while True:
         try:
             user = input("> ").strip()

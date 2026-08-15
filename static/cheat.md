@@ -1,7 +1,6 @@
 Prefixes:
   cc <prompt>   force Claude Code (email, web, GitHub, full reach)
-  gg <prompt>   force cloud model (glm-5.2:cloud, tool loop)
-  (no prefix)   Claude Code; falls back to the cloud model if CC errors
+  (no prefix)   cloud model (glm-5.2:cloud, tool loop; escalates to CC when needed)
 
 Commands:
   usage / calls     CC call count today
